@@ -6,7 +6,9 @@ and settings are unchanged.
 
 ## What's added
 
-- **Compass bar** at the top of the screen: N/E/S/W and NE/SE/SW/NW letters,
+- **Teammates on the game's compass**: blue markers with their distance, placed
+  on the game's own compass at the top of the screen.
+- **Optional compass bar** (off by default): N/E/S/W and NE/SE/SW/NW letters,
   your selected waypoint (hollow yellow diamond, or an arrow at the edge when it
   is behind you), teammates (blue triangles) and pings (orange diamonds).
 - **Coordinate readout** under the compass: `X` (east) and `Y` (north) in metres,
@@ -22,14 +24,17 @@ and settings are unchanged.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `show_compass` | `true` | Compass bar on/off |
+| `show_compass_players` | `true` | Teammate markers on the game's compass |
+| `game_compass_offset` | `0` | Nudge those markers; pixels at 1080p, positive moves down |
+| `game_compass_width_percent` | `100` | Spread of those markers; raise if they drift outward of the game's letters |
+| `show_compass` | `false` | Extra compass bar on/off (teammate markers then move to the bar) |
 | `show_coordinates` | `true` | Coordinate readout on/off |
 | `show_waypoint_distance` | `true` | Waypoint distance on/off |
 | `show_height` | `false` | Add height to the coordinates (may be approximate) |
 | `marker_colors` | `colorblind` | `colorblind` or `original` |
-| `compass_toggle_key` | `F8` | Hide/show compass and readout; `none` disables |
-| `compass_offset` | `0` | Pixels at 1080p; positive moves the compass down |
-| `compass_scale_percent` | `100` | 50 to 200 |
+| `compass_toggle_key` | `F8` | Hide/show all compass additions and the readout; `none` disables |
+| `compass_offset` | `0` | Moves the bar and readout; pixels at 1080p, positive moves down |
+| `compass_scale_percent` | `100` | Size of the bar and readout, 50 to 200 |
 
 Changes apply while playing (checked every second).
 

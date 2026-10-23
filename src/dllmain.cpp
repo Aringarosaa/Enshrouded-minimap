@@ -1439,7 +1439,9 @@ namespace
     std::atomic<bool> g_showOtherPlayers{ true };
     std::atomic<bool> g_showPings{ true };
     std::atomic<bool> g_showWaypoints{ true };
-    std::atomic<bool> g_showCompass{ true }, g_showCoordinates{ true }, g_showWaypointDistance{ true };
+    std::atomic<bool> g_showCompass{ false }, g_showCoordinates{ true }, g_showWaypointDistance{ true };
+    std::atomic<bool> g_showGameCompassPlayers{ true };
+    std::atomic<int> g_gameCompassOffset{ 0 }, g_gameCompassWidthPercent{ 100 };
     std::atomic<bool> g_showHeight{ false }, g_colorBlindMarkers{ true }, g_compassHudVisible{ true };
     std::atomic<int> g_compassToggleKey{ VK_F8 }, g_compassOffset{ 0 }, g_compassScalePercent{ 100 };
     std::atomic<int> g_minimapMapSampleStep{ MINIMAP_DEFAULT_MAP_SAMPLE_STEP };
@@ -1968,7 +1970,14 @@ namespace
             readOption("compass_offset", compassOffset);
             readOption("compass_scale_percent", compassScale);
             readOption("marker_colors", markerColors);
-            const bool showCompass = ReadMarkerVisibility(modContext, "show_compass");
+            std::string compassValue = "false", gameOffset = "0", gameWidth = "100";
+            readOption("show_compass", compassValue);
+            readOption("game_compass_offset", gameOffset);
+            readOption("game_compass_width_percent", gameWidth);
+            const bool showCompass = ParseConfigBoolean(compassValue, false);
+            const bool showGamePlayers = ReadMarkerVisibility(modContext, "show_compass_players");
+            const int gameOffsetValue = ParseSignedConfigInteger(gameOffset, 0, -1080, 1080);
+            const int gameWidthValue = ParseConfigInteger(gameWidth, 100, 50, 200);
             const bool showCoordinates = ReadMarkerVisibility(modContext, "show_coordinates");
             const bool showDistance = ReadMarkerVisibility(modContext, "show_waypoint_distance");
             std::string heightValue = "false";
@@ -1979,6 +1988,9 @@ namespace
             const int offsetValue = ParseSignedConfigInteger(compassOffset, 0, -1080, 1080);
             const int scaleValue = ParseConfigInteger(compassScale, 100, 50, 200);
             bool changed = g_showCompass.exchange(showCompass) != showCompass;
+            changed |= g_showGameCompassPlayers.exchange(showGamePlayers) != showGamePlayers;
+            changed |= g_gameCompassOffset.exchange(gameOffsetValue) != gameOffsetValue;
+            changed |= g_gameCompassWidthPercent.exchange(gameWidthValue) != gameWidthValue;
             changed |= g_showCoordinates.exchange(showCoordinates) != showCoordinates;
             changed |= g_showWaypointDistance.exchange(showDistance) != showDistance;
             changed |= g_showHeight.exchange(showHeight) != showHeight;
@@ -1990,6 +2002,9 @@ namespace
             {
                 std::ostringstream hud;
                 hud << "[Minimap] hud config | show_compass=" << showCompass
+                    << " | show_compass_players=" << showGamePlayers
+                    << " | game_compass_offset=" << gameOffsetValue
+                    << " | game_compass_width_percent=" << gameWidthValue
                     << " | show_coordinates=" << showCoordinates
                     << " | show_waypoint_distance=" << showDistance
                     << " | show_height=" << showHeight
@@ -10091,10 +10106,80 @@ namespace
         }
     }
 
+    // Text with a dark one-pixel outline, for drawing straight over the game
+    // scene where the background colour is unknown.
+    void DrawHudOutlinedText(VulkanMinimapRenderer& renderer, void* commandBuffer, const std::wstring& text,
+        int x, int y, int pixelHeight, CompassHud::Rgb color, CompassHud::Rgb outline)
+    {
+        std::vector<VkClearRect> ink, edge;
+        int penX = x;
+        for (wchar_t ch : text)
+        {
+            const HudGlyph& glyph = GetHudGlyph(ch, pixelHeight, true);
+            for (int shade = 3; shade < 8; ++shade)
+                for (const RECT& r : glyph.ink[shade])
+                {
+                    const int left = penX + r.left, top = y + r.top, width = r.right - r.left;
+                    AppendClippedClearRect(renderer, ink, left, top, width, 1);
+                    AppendClippedClearRect(renderer, edge, left - 1, top, width + 2, 1);
+                    AppendClippedClearRect(renderer, edge, left, top - 1, width, 1);
+                    AppendClippedClearRect(renderer, edge, left, top + 1, width, 1);
+                }
+            penX += glyph.advance;
+        }
+        CmdClearRects(renderer, commandBuffer, outline.r, outline.g, outline.b, 1.0f, edge);
+        CmdClearRects(renderer, commandBuffer, color.r, color.g, color.b, 1.0f, ink);
+    }
+
+    // Teammate markers placed on the game's own compass. Its layout was measured
+    // at 2560x1440 with default HUD settings: centred, about 3.5 pixels per
+    // degree at 1080p, icons 39 pixels from the top and roughly +-70 degrees wide.
+    void DrawGameCompassPlayers(VulkanMinimapRenderer& renderer, void* commandBuffer,
+        float playerX, float playerZ, float heading)
+    {
+        std::vector<MinimapLive::Marker> players, pings;
+        CopyLiveMarkers(players, pings, GetTickCount());
+        if (players.empty())
+            return;
+        const float unit = static_cast<float>(renderer.height) / 1080.0f;
+        const auto px = [unit](float value) { return MaxValue(1, static_cast<int>(std::lround(value * unit))); };
+        const float pixelsPerDegree = 3.5f * unit * ClampValue(g_gameCompassWidthPercent.load(), 50, 200) / 100.0f;
+        const int cx = static_cast<int>(renderer.width) / 2;
+        const int iconY = px(39) + ScaleMinimapOffset(g_gameCompassOffset.load(), renderer.height);
+        const auto& palette = CompassHud::Palette(g_colorBlindMarkers.load());
+        constexpr float maxDegrees = 68.0f;
+        for (const auto& player : players)
+        {
+            const float x = FixedToWorld(player.x), z = FixedToWorld(player.z);
+            const float relative = CompassHud::WrapRadians(CompassHud::BearingRadians(playerX, playerZ, x, z) - heading) *
+                180.0f / CompassHud::Pi;
+            if (!std::isfinite(relative) || std::fabs(relative) > maxDegrees)
+                continue;
+            const int ix = cx + static_cast<int>(std::lround(relative * pixelsPerDegree));
+            // Head-and-shoulders silhouette inside a blue, dark-edged shield.
+            const int r = px(10);
+            CmdClearSolidDiamond(renderer, commandBuffer, ix, iconY, r + px(2), palette.outline.r, palette.outline.g, palette.outline.b);
+            CmdClearSolidDiamond(renderer, commandBuffer, ix, iconY, r, palette.playerLight.r, palette.playerLight.g, palette.playerLight.b);
+            CmdClearCircle(renderer, commandBuffer, palette.playerDark.r, palette.playerDark.g, palette.playerDark.b, 1.0f,
+                ix, iconY - px(3), px(2.6f), 1);
+            CmdClearRect(renderer, commandBuffer, palette.playerDark.r, palette.playerDark.g, palette.playerDark.b, 1.0f,
+                ix - px(4), iconY + px(1), 2 * px(4) + 1, px(3.5f));
+
+            std::wstring label = CompassHud::FormatDistance(CompassHud::HorizontalDistance(playerX, playerZ, x, z));
+            label.erase(std::remove(label.begin(), label.end(), L' '), label.end());
+            const int textSize = px(14);
+            const int w = MeasureHudText(label, textSize, true);
+            const int h = HudTextHeight(textSize, true);
+            DrawHudOutlinedText(renderer, commandBuffer, label, ix - w / 2, iconY - r - px(3) - h, textSize,
+                palette.playerLight, palette.outline);
+        }
+    }
+
     bool ShouldDrawCompassHud()
     {
         return g_compassHudVisible.load() &&
-            (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load());
+            (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load() ||
+             g_showGameCompassPlayers.load());
     }
 
     void DrawCompassHud(VulkanMinimapRenderer& renderer, void* commandBuffer)
@@ -10114,6 +10199,10 @@ namespace
         const float heading = position.hasHeading && std::isfinite(position.headingRadians) ?
             SmoothMapHeading(renderer, position.headingRadians, true, GetTickCount()) : 0.0f;
         const HudWaypointInfo waypoint = NearestHudWaypoint(CopyWaypoints(), playerX, playerZ);
+        // The game's compass follows the camera without smoothing, so use the raw heading.
+        if (g_showGameCompassPlayers.load() && !g_showCompass.load() && position.hasHeading &&
+            std::isfinite(position.headingRadians))
+            DrawGameCompassPlayers(renderer, commandBuffer, playerX, playerZ, position.headingRadians);
         if (g_showCompass.load() && position.hasHeading)
             top = DrawCompassBar(renderer, commandBuffer, scale, cx, top, playerX, playerZ, heading, waypoint) +
                 static_cast<int>(std::lround(4.0f * scale));
