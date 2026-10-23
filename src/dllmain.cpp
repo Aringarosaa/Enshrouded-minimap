@@ -9954,13 +9954,13 @@ namespace
     {
         const auto& palette = CompassHud::Palette(g_colorBlindMarkers.load());
         const auto s = [scale](float value) { return MaxValue(1, static_cast<int>(std::lround(value * scale))); };
-        const int halfWidth = s(300), halfHeight = s(17);
+        const int halfWidth = s(250), halfHeight = s(17);
         const int cy = top + halfHeight;
         DrawHudPlate(renderer, commandBuffer, cx, cy, halfWidth, halfHeight, s(1.5f));
         CmdClearRimJewel(renderer, commandBuffer, cx - halfWidth, cy);
         CmdClearRimJewel(renderer, commandBuffer, cx + halfWidth, cy);
 
-        const int innerHalf = halfWidth - s(26);
+        const int innerHalf = halfWidth - s(22);
         const int innerTop = cy - halfHeight + s(5), innerBottom = cy + halfHeight - s(5);
         constexpr float degree = CompassHud::Pi / 180.0f;
         static const wchar_t* const labels[8] = {L"N", L"NE", L"E", L"SE", L"S", L"SW", L"W", L"NW"};
@@ -10102,10 +10102,13 @@ namespace
         CapturedPlayerPosition position{};
         if (!TryGetPlayerPosition(position))
             return;
-        const float scale = static_cast<float>(renderer.height) / 1080.0f *
+        // 100% is drawn about a fifth larger than the minimap clock text.
+        const float scale = static_cast<float>(renderer.height) / 1080.0f * 1.2f *
             ClampValue(g_compassScalePercent.load(), 50, 200) / 100.0f;
         const int cx = static_cast<int>(renderer.width) / 2;
-        int top = static_cast<int>(std::lround(14.0f * scale)) +
+        // Below the game's own compass and the health/stamina bars, which can
+        // stretch past the centre of the screen at higher levels.
+        int top = static_cast<int>(std::lround(74.0f * static_cast<float>(renderer.height) / 1080.0f)) +
             ScaleMinimapOffset(g_compassOffset.load(), renderer.height);
         const float playerX = FixedToWorld(position.x), playerZ = FixedToWorld(position.z);
         const float heading = position.hasHeading && std::isfinite(position.headingRadians) ?
