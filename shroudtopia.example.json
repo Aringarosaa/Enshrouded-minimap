@@ -1,0 +1,31 @@
+{
+    "active": true,
+    "bootDelay": 3000,
+    "enableLogging": true,
+    "logLevel": "INFO",
+    "mods": {
+        "minimap_mod": {
+            "active": true,
+            "debug_logging": false,
+            "map_light": 20,
+            "map_sample_step": 2,
+            "map_style": "default",
+            "max_icons": 64,
+            "position": "bottom-right",
+            "render_camera_fallback": false,
+            "show_clock": true,
+            "show_fog_of_war": true,
+            "show_weather": true,
+            "toggle_key": "F10",
+            "show_compass": true,
+            "show_coordinates": true,
+            "show_waypoint_distance": true,
+            "show_height": false,
+            "marker_colors": "colorblind",
+            "compass_toggle_key": "F8",
+            "compass_offset": 0,
+            "compass_scale_percent": 100
+        }
+    },
+    "updateDelay": 500
+}

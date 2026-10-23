@@ -1,8 +1,8 @@
 {
   "id": "minimap_mod",
   "version": "0.5.15",
-  "name": "Shroudweave Minimap",
-  "description": "In-game minimap and world clock for Enshrouded. Compatible with Creative Mode 3.0.0.",
+  "name": "Shroudweave Minimap + Compass (Clear View)",
+  "description": "In-game minimap, world clock, compass bar, coordinates and waypoint distance for Enshrouded, with colour-blind friendly colours.",
   "author": "Aerox912; original minimap by elxokker",
   "authors": [
     "elxokker",
@@ -23,7 +23,7 @@
       "show_waypoints": true,
       "show_world_markers": true,
       "show_death_markers": true,
-      "map_light": 55,
+      "map_light": 20,
       "map_style": "default",
       "icon_style": "original",
       "heading_smoothing_ms": 55,
@@ -39,7 +39,15 @@
       "zoom_out_key_secondary": "0x6D",
       "scale_percent": 100,
       "size_decrease_key": "F9",
-      "size_increase_key": "F11"
+      "size_increase_key": "F11",
+      "show_compass": true,
+      "show_coordinates": true,
+      "show_waypoint_distance": true,
+      "show_height": false,
+      "marker_colors": "colorblind",
+      "compass_toggle_key": "F8",
+      "compass_offset": 0,
+      "compass_scale_percent": 100
     }
   }
 }

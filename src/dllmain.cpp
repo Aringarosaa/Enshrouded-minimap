@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "live_markers.h"
 #include "toggle_notice.h"
+#include "compass_hud.h"
 #include "client_1_0_profile.h"
 #include "menu_visibility_1_0.h"
 #include "public_creative_compat.h"
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <cwchar>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <memory>
 #include <sstream>
@@ -1427,6 +1429,7 @@ namespace
     bool g_sizeDecreaseDown = false, g_sizeIncreaseDown = false;
     std::atomic<bool> g_minimapVisible{ true };
     ToggleNoticeState g_toggleNotice;
+    ToggleNoticeState g_compassNotice;
     std::atomic<int> g_minimapToggleKey{ VK_F10 };
     std::atomic<int> g_minimapToggleSecondary{ VK_MULTIPLY };
     std::atomic<int> g_minimapZoomInKey{ VK_OEM_PLUS }, g_minimapZoomInSecondary{ VK_ADD };
@@ -1436,6 +1439,9 @@ namespace
     std::atomic<bool> g_showOtherPlayers{ true };
     std::atomic<bool> g_showPings{ true };
     std::atomic<bool> g_showWaypoints{ true };
+    std::atomic<bool> g_showCompass{ true }, g_showCoordinates{ true }, g_showWaypointDistance{ true };
+    std::atomic<bool> g_showHeight{ false }, g_colorBlindMarkers{ true }, g_compassHudVisible{ true };
+    std::atomic<int> g_compassToggleKey{ VK_F8 }, g_compassOffset{ 0 }, g_compassScalePercent{ 100 };
     std::atomic<int> g_minimapMapSampleStep{ MINIMAP_DEFAULT_MAP_SAMPLE_STEP };
     std::atomic<int> g_minimapMapLight{ 55 };
     std::atomic<int> g_headingSmoothingMs{ 55 };
@@ -1956,6 +1962,44 @@ namespace
         const bool previousPlayers = g_showOtherPlayers.exchange(showPlayers);
         const bool previousPings = g_showPings.exchange(showPings);
         const bool previousWaypoints = g_showWaypoints.exchange(showWaypoints);
+        {
+            std::string compassKey = "F8", compassOffset = "0", compassScale = "100", markerColors = "colorblind";
+            readOption("compass_toggle_key", compassKey);
+            readOption("compass_offset", compassOffset);
+            readOption("compass_scale_percent", compassScale);
+            readOption("marker_colors", markerColors);
+            const bool showCompass = ReadMarkerVisibility(modContext, "show_compass");
+            const bool showCoordinates = ReadMarkerVisibility(modContext, "show_coordinates");
+            const bool showDistance = ReadMarkerVisibility(modContext, "show_waypoint_distance");
+            std::string heightValue = "false";
+            readOption("show_height", heightValue);
+            const bool showHeight = ParseConfigBoolean(heightValue, false);
+            const bool colorBlind = NormalizeConfigValue(markerColors) != "original";
+            const int key = ParseMinimapToggleKey(compassKey, VK_F8);
+            const int offsetValue = ParseSignedConfigInteger(compassOffset, 0, -1080, 1080);
+            const int scaleValue = ParseConfigInteger(compassScale, 100, 50, 200);
+            bool changed = g_showCompass.exchange(showCompass) != showCompass;
+            changed |= g_showCoordinates.exchange(showCoordinates) != showCoordinates;
+            changed |= g_showWaypointDistance.exchange(showDistance) != showDistance;
+            changed |= g_showHeight.exchange(showHeight) != showHeight;
+            changed |= g_colorBlindMarkers.exchange(colorBlind) != colorBlind;
+            changed |= g_compassToggleKey.exchange(key) != key;
+            changed |= g_compassOffset.exchange(offsetValue) != offsetValue;
+            changed |= g_compassScalePercent.exchange(scaleValue) != scaleValue;
+            if (changed || forceLog)
+            {
+                std::ostringstream hud;
+                hud << "[Minimap] hud config | show_compass=" << showCompass
+                    << " | show_coordinates=" << showCoordinates
+                    << " | show_waypoint_distance=" << showDistance
+                    << " | show_height=" << showHeight
+                    << " | marker_colors=" << (colorBlind ? "colorblind" : "original")
+                    << " | compass_toggle_key=" << MinimapToggleKeyName(key)
+                    << " | compass_offset=" << offsetValue
+                    << " | compass_scale_percent=" << scaleValue;
+                Log(hud.str());
+            }
+        }
         if (!forceLog && !hotkeysChanged && !scaleChanged && previousDefaultStyle == defaultStyle &&
             previousMapOrientation == mapOrientation && previousOffset == offset &&
             previous == static_cast<int>(placement) &&
@@ -2582,6 +2626,11 @@ namespace
         return g_toggleNotice.read(GetTickCount64(), IsMinimapGameFocused() && IsMinimapGameplay(), on);
     }
 
+    bool ReadCompassNotice(bool& on)
+    {
+        return g_compassNotice.read(GetTickCount64(), IsMinimapGameFocused() && IsMinimapGameplay(), on);
+    }
+
     std::string ResolveGameLogPath()
     {
         char modulePath[MAX_PATH] = {};
@@ -2864,7 +2913,7 @@ namespace
 
     void ResetWorldSessionFromLog()
     {
-        g_toggleNotice.clear();
+        g_toggleNotice.clear(); g_compassNotice.clear();
         const bool wasOnline = g_gameSessionOnline.exchange(false);
         const bool wasReady = g_worldSessionReady.exchange(false);
         g_lastWorldDataTick.store(0);
@@ -2916,7 +2965,7 @@ namespace
             const bool wasOnline = g_gameSessionOnline.exchange(true);
             if (!wasOnline)
             {
-                g_toggleNotice.clear();
+                g_toggleNotice.clear(); g_compassNotice.clear();
                 g_minimapVisible.store(true);
                 Log("[Minimap] game session detected from Enshrouded log");
             }
@@ -9236,11 +9285,14 @@ namespace
                 }
             }
         }
+        const auto& palette = CompassHud::Palette(g_colorBlindMarkers.load());
         for (std::size_t i = 0; i < shades.size(); ++i)
         {
             const float brightness = static_cast<float>(i) / 7.0f;
-            CmdClearRects(renderer, commandBuffer, 0.03f + brightness * 0.32f,
-                0.08f + brightness * 0.92f, 0.025f + brightness * 0.20f, 1.0f, shades[i]);
+            CmdClearRects(renderer, commandBuffer,
+                palette.playerDark.r + brightness * (palette.playerLight.r - palette.playerDark.r),
+                palette.playerDark.g + brightness * (palette.playerLight.g - palette.playerDark.g),
+                palette.playerDark.b + brightness * (palette.playerLight.b - palette.playerDark.b), 1.0f, shades[i]);
         }
     }
 
@@ -9248,12 +9300,13 @@ namespace
     {
         // Small-scale version of the game's green ping: bright diamond rim,
         // green fill, and a dark downward arrow. Clear attachments do not blend.
-        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 13, 0.02f, 0.10f, 0.03f);
-        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 11, 0.64f, 1.0f, 0.48f);
-        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 8, 0.12f, 0.66f, 0.18f);
-        CmdClearRect(renderer, commandBuffer, 0.02f, 0.15f, 0.03f, 1.0f, x - 1, y - 5, 3, 7);
+        const auto& p = CompassHud::Palette(g_colorBlindMarkers.load());
+        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 13, p.pingEdge.r, p.pingEdge.g, p.pingEdge.b);
+        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 11, p.pingRim.r, p.pingRim.g, p.pingRim.b);
+        CmdClearSolidDiamond(renderer, commandBuffer, x, y, 8, p.pingFill.r, p.pingFill.g, p.pingFill.b);
+        CmdClearRect(renderer, commandBuffer, p.pingGlyph.r, p.pingGlyph.g, p.pingGlyph.b, 1.0f, x - 1, y - 5, 3, 7);
         for (int row = 0; row < 5; ++row)
-            CmdClearRect(renderer, commandBuffer, 0.02f, 0.15f, 0.03f, 1.0f, x - 4 + row, y + row, 9 - 2 * row, 1);
+            CmdClearRect(renderer, commandBuffer, p.pingGlyph.r, p.pingGlyph.g, p.pingGlyph.b, 1.0f, x - 4 + row, y + row, 9 - 2 * row, 1);
     }
 
     void DrawMarkerDiamondOutline(VulkanMinimapRenderer& renderer, void* commandBuffer, int x, int y,
@@ -9279,13 +9332,21 @@ namespace
 
     void DrawWaypointDiamond(VulkanMinimapRenderer& renderer, void* commandBuffer, int x, int y)
     {
-        DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 15, 1.0f, 0.86f, 0.28f);
+        const auto& p = CompassHud::Palette(g_colorBlindMarkers.load());
+        if (g_colorBlindMarkers.load())
+        {
+            // A dark edge on both sides keeps the outline visible on bright terrain.
+            DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 17, p.outline.r, p.outline.g, p.outline.b);
+            DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 13, p.outline.r, p.outline.g, p.outline.b);
+        }
+        DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 15, p.waypoint.r, p.waypoint.g, p.waypoint.b);
     }
 
     void DrawCustomPinOutline(VulkanMinimapRenderer& renderer, void* commandBuffer, int x, int y)
     {
         // The red edge stays visible outside a selected waypoint's yellow edge.
-        DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 18, 1.0f, 0.20f, 0.16f);
+        const auto& p = CompassHud::Palette(g_colorBlindMarkers.load());
+        DrawMarkerDiamondOutline(renderer, commandBuffer, x, y, 18, p.customPin.r, p.customPin.g, p.customPin.b);
     }
 
     void DrawWorldPointIcons(VulkanMinimapRenderer& renderer, void* commandBuffer,
@@ -9626,16 +9687,17 @@ namespace
                 cy + radius + frameBottomExtra + CLOCK_FRAME_GAP + CLOCK_PANEL_HALF_HEIGHT, clock, weather, showClock);
     }
 
-    void DrawMinimapNotice(VulkanMinimapRenderer& renderer, void* commandBuffer, bool on, int dpi = 96)
+    void DrawMinimapNotice(VulkanMinimapRenderer& renderer, void* commandBuffer, bool on, int dpi = 96,
+        bool compass = false)
     {
         // Rasterize only when state or display scale changes. Drawing uses the
         // existing game render pass, including when the minimap itself is off.
         static int cachedDpi = 0;
-        static bool cachedOn = false;
+        static bool cachedOn = false, cachedCompass = false;
         static std::array<std::vector<RECT>, 8> ink;
         dpi = ClampValue(dpi, 96, 384);
         const int width = MulDiv(240, dpi, 96), height = MulDiv(38, dpi, 96);
-        if (cachedDpi != dpi || cachedOn != on)
+        if (cachedDpi != dpi || cachedOn != on || cachedCompass != compass)
         {
             for (auto& shade : ink) shade.clear();
             HDC dc = CreateCompatibleDC(nullptr);
@@ -9653,7 +9715,9 @@ namespace
                 std::memset(pixels, 0, width * height * 4);
                 SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255,255,255));
                 RECT bounds{0,0,width,height};
-                DrawTextW(dc, on ? L"Minimap: On" : L"Minimap: Off", -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                const wchar_t* label = compass ? (on ? L"Compass: On" : L"Compass: Off") :
+                    (on ? L"Minimap: On" : L"Minimap: Off");
+                DrawTextW(dc, label, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 GdiFlush();
                 auto bytes = static_cast<const std::uint8_t*>(pixels);
                 for (int y = 0; y < height; ++y)
@@ -9665,7 +9729,7 @@ namespace
                         if (shade) ink[shade].push_back({start,y,x,y+1});
                     }
                 SelectObject(dc, oldFont); SelectObject(dc, oldBitmap);
-                cachedDpi = dpi; cachedOn = on;
+                cachedDpi = dpi; cachedOn = on; cachedCompass = compass;
             }
             if (font) DeleteObject(font);
             if (bitmap) DeleteObject(bitmap);
@@ -9684,6 +9748,373 @@ namespace
             const float a = shade/7.f;
             CmdClearRects(renderer, commandBuffer, (24+215*a)/255.f, (27+215*a)/255.f, (30+214*a)/255.f, 1, runs);
         }
+    }
+
+
+    // ---- Compass bar, coordinate readout and waypoint distance -------------
+    // Text is rasterized once per character with GDI and cached as grey-level
+    // runs. Clear attachments do not blend, so text is only drawn on plates
+    // whose background colour is known and shades are mixed against it.
+    struct HudGlyph
+    {
+        int advance = 0;
+        int height = 0;
+        std::array<std::vector<RECT>, 8> ink;
+    };
+
+    const HudGlyph& GetHudGlyph(wchar_t ch, int pixelHeight, bool bold)
+    {
+        static std::map<std::uint64_t, HudGlyph> cache;
+        pixelHeight = ClampValue(pixelHeight, 8, 96);
+        const std::uint64_t key = static_cast<std::uint64_t>(ch) |
+            (static_cast<std::uint64_t>(pixelHeight) << 16) | (bold ? (1ULL << 32) : 0ULL);
+        const auto found = cache.find(key);
+        if (found != cache.end())
+            return found->second;
+        if (cache.size() > 1024)
+            cache.clear();
+
+        HudGlyph& glyph = cache[key];
+        HDC dc = CreateCompatibleDC(nullptr);
+        HFONT font = CreateFontW(-pixelHeight, 0, 0, 0, bold ? FW_BOLD : FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        if (!dc || !font)
+        {
+            if (font) DeleteObject(font);
+            if (dc) DeleteDC(dc);
+            return glyph;
+        }
+        HGDIOBJ oldFont = SelectObject(dc, font);
+        SIZE extent{};
+        TEXTMETRICW metrics{};
+        GetTextExtentPoint32W(dc, &ch, 1, &extent);
+        GetTextMetricsW(dc, &metrics);
+        const int width = MaxValue(1, static_cast<int>(extent.cx) + 2);
+        const int height = MaxValue(1, static_cast<int>(metrics.tmHeight));
+        glyph.advance = static_cast<int>(extent.cx);
+        glyph.height = height;
+
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+        void* pixels = nullptr;
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (bitmap && pixels)
+        {
+            HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+            std::memset(pixels, 0, static_cast<std::size_t>(width) * height * 4);
+            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+            TextOutW(dc, 1, 0, &ch, 1);
+            GdiFlush();
+            const auto bytes = static_cast<const std::uint8_t*>(pixels);
+            for (int y = 0; y < height; ++y)
+                for (int x = 0; x < width;)
+                {
+                    const int shade = bytes[(y * width + x) * 4] * 7 / 255;
+                    const int start = x++;
+                    while (x < width && bytes[(y * width + x) * 4] * 7 / 255 == shade) ++x;
+                    if (shade) glyph.ink[shade].push_back({start - 1, y, x - 1, y + 1});
+                }
+            SelectObject(dc, oldBitmap);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        SelectObject(dc, oldFont);
+        DeleteObject(font);
+        DeleteDC(dc);
+        return glyph;
+    }
+
+    int MeasureHudText(const std::wstring& text, int pixelHeight, bool bold)
+    {
+        int width = 0;
+        for (wchar_t ch : text) width += GetHudGlyph(ch, pixelHeight, bold).advance;
+        return width;
+    }
+
+    int HudTextHeight(int pixelHeight, bool bold)
+    {
+        return GetHudGlyph(L'X', pixelHeight, bold).height;
+    }
+
+    // Draws text with its top-left corner at (x, y) over a solid background colour.
+    void DrawHudText(VulkanMinimapRenderer& renderer, void* commandBuffer, const std::wstring& text,
+        int x, int y, int pixelHeight, bool bold, CompassHud::Rgb color, CompassHud::Rgb background)
+    {
+        std::array<std::vector<VkClearRect>, 8> runs;
+        int penX = x;
+        for (wchar_t ch : text)
+        {
+            const HudGlyph& glyph = GetHudGlyph(ch, pixelHeight, bold);
+            for (int shade = 1; shade < 8; ++shade)
+                for (const RECT& r : glyph.ink[shade])
+                    AppendClippedClearRect(renderer, runs[shade], penX + r.left, y + r.top, r.right - r.left, 1);
+            penX += glyph.advance;
+        }
+        for (int shade = 1; shade < 8; ++shade)
+        {
+            const float a = shade / 7.0f;
+            CmdClearRects(renderer, commandBuffer,
+                background.r + (color.r - background.r) * a,
+                background.g + (color.g - background.g) * a,
+                background.b + (color.b - background.b) * a, 1.0f, runs[shade]);
+        }
+    }
+
+    // Bronze nameplate matching the world clock panel, with chamfered corners.
+    constexpr CompassHud::Rgb HUD_PLATE_INSET = {0.032f, 0.042f, 0.043f};
+    constexpr CompassHud::Rgb HUD_TEXT = {0.96f, 0.89f, 0.69f};
+    constexpr CompassHud::Rgb HUD_TEXT_DIM = {0.72f, 0.64f, 0.47f};
+
+    void DrawHudPlate(VulkanMinimapRenderer& renderer, void* commandBuffer, int cx, int cy, int halfWidth, int halfHeight, int border)
+    {
+        auto layer = [&](int inset, float r, float g, float b) {
+            const int hw = halfWidth - inset, hh = halfHeight - inset;
+            if (hw <= 0 || hh <= 0) return;
+            const int chamfer = MaxValue(2, hh / 2);
+            std::vector<VkClearRect> rows;
+            rows.reserve(hh * 2 + 1);
+            for (int y = -hh; y <= hh; ++y)
+            {
+                const int cut = MaxValue(0, std::abs(y) - hh + chamfer);
+                AppendClippedClearRect(renderer, rows, cx - hw + cut, cy + y, 2 * (hw - cut) + 1, 1);
+            }
+            CmdClearRects(renderer, commandBuffer, r, g, b, 1.0f, rows);
+        };
+        const int step = MaxValue(1, border);
+        layer(0, 0.025f, 0.022f, 0.018f);
+        layer(step, 0.65f, 0.48f, 0.25f);
+        layer(step * 2, 0.23f, 0.17f, 0.09f);
+        layer(step * 2 + 1, 0.76f, 0.59f, 0.32f);
+        layer(step * 3 + 1, HUD_PLATE_INSET.r, HUD_PLATE_INSET.g, HUD_PLATE_INSET.b);
+    }
+
+    void DrawHudTriangle(VulkanMinimapRenderer& renderer, void* commandBuffer, int x, int y, int size,
+        int direction, CompassHud::Rgb color)
+    {
+        // direction: 0 = down, 1 = up, 2 = left, 3 = right. (x, y) is the tip.
+        std::vector<VkClearRect> rects;
+        for (int i = 0; i <= size; ++i)
+        {
+            switch (direction)
+            {
+            case 0: AppendClippedClearRect(renderer, rects, x - i, y - i, 2 * i + 1, 1); break;
+            case 1: AppendClippedClearRect(renderer, rects, x - i, y + i, 2 * i + 1, 1); break;
+            case 2: AppendClippedClearRect(renderer, rects, x + i, y - i, 1, 2 * i + 1); break;
+            default: AppendClippedClearRect(renderer, rects, x - i, y - i, 1, 2 * i + 1); break;
+            }
+        }
+        CmdClearRects(renderer, commandBuffer, color.r, color.g, color.b, 1.0f, rects);
+    }
+
+    void DrawHudHollowDiamond(VulkanMinimapRenderer& renderer, void* commandBuffer, int x, int y, int extent,
+        int thickness, CompassHud::Rgb color)
+    {
+        std::vector<VkClearRect> rects;
+        for (int dy = -extent; dy <= extent; ++dy)
+        {
+            const int outer = extent - std::abs(dy);
+            const int inner = extent - thickness - std::abs(dy);
+            if (inner < 0)
+                AppendClippedClearRect(renderer, rects, x - outer, y + dy, outer * 2 + 1, 1);
+            else
+            {
+                AppendClippedClearRect(renderer, rects, x - outer, y + dy, outer - inner, 1);
+                AppendClippedClearRect(renderer, rects, x + inner + 1, y + dy, outer - inner, 1);
+            }
+        }
+        CmdClearRects(renderer, commandBuffer, color.r, color.g, color.b, 1.0f, rects);
+    }
+
+    struct HudWaypointInfo
+    {
+        bool valid = false;
+        float x = 0, z = 0, distance = 0;
+    };
+
+    HudWaypointInfo NearestHudWaypoint(const std::vector<CapturedWaypoint>& waypoints, float playerX, float playerZ)
+    {
+        HudWaypointInfo best;
+        if (!g_liveMarkerLayoutSupported || !g_showWaypoints.load())
+            return best;
+        for (const auto& waypoint : waypoints)
+        {
+            const float x = FixedToWorld(waypoint.x), z = FixedToWorld(waypoint.z);
+            const float distance = CompassHud::HorizontalDistance(playerX, playerZ, x, z);
+            if (!std::isfinite(distance)) continue;
+            if (!best.valid || distance < best.distance)
+                best = {true, x, z, distance};
+        }
+        return best;
+    }
+
+    // Returns the bottom edge of the drawn bar so the readout can sit below it.
+    int DrawCompassBar(VulkanMinimapRenderer& renderer, void* commandBuffer, float scale, int cx, int top,
+        float playerX, float playerZ, float heading, const HudWaypointInfo& waypoint)
+    {
+        const auto& palette = CompassHud::Palette(g_colorBlindMarkers.load());
+        const auto s = [scale](float value) { return MaxValue(1, static_cast<int>(std::lround(value * scale))); };
+        const int halfWidth = s(300), halfHeight = s(17);
+        const int cy = top + halfHeight;
+        DrawHudPlate(renderer, commandBuffer, cx, cy, halfWidth, halfHeight, s(1.5f));
+        CmdClearRimJewel(renderer, commandBuffer, cx - halfWidth, cy);
+        CmdClearRimJewel(renderer, commandBuffer, cx + halfWidth, cy);
+
+        const int innerHalf = halfWidth - s(26);
+        const int innerTop = cy - halfHeight + s(5), innerBottom = cy + halfHeight - s(5);
+        constexpr float degree = CompassHud::Pi / 180.0f;
+        static const wchar_t* const labels[8] = {L"N", L"NE", L"E", L"SE", L"S", L"SW", L"W", L"NW"};
+
+        // Ticks every 15 degrees, letters on the eight compass points.
+        std::vector<VkClearRect> minorTicks;
+        for (int step = 0; step < 24; ++step)
+        {
+            float offset = 0;
+            if (!CompassHud::BearingToBarOffset(step * 15.0f * degree, heading, innerHalf, offset))
+                continue;
+            const int x = cx + static_cast<int>(std::lround(offset));
+            if (step % 3 == 0)
+            {
+                const int point = step / 3;
+                const bool cardinal = point % 2 == 0;
+                const int textSize = cardinal ? s(17) : s(12);
+                const std::wstring text = labels[point];
+                const int w = MeasureHudText(text, textSize, cardinal);
+                const int h = HudTextHeight(textSize, cardinal);
+                const CompassHud::Rgb color = point == 0 ? CompassHud::Rgb{1.0f, 0.80f, 0.38f} :
+                    cardinal ? HUD_TEXT : HUD_TEXT_DIM;
+                DrawHudText(renderer, commandBuffer, text, x - w / 2, cy - h / 2, textSize, cardinal, color, HUD_PLATE_INSET);
+            }
+            else
+            {
+                AppendClippedClearRect(renderer, minorTicks,
+                    x - s(0.5f) / 2, innerBottom - s(5), s(1.2f), s(5));
+                AppendClippedClearRect(renderer, minorTicks, x - s(0.5f) / 2, innerTop, s(1.2f), s(3));
+            }
+        }
+        CmdClearRects(renderer, commandBuffer, 0.55f, 0.44f, 0.27f, 1.0f, minorTicks);
+
+        // Teammates: small downward triangles along the top edge.
+        std::vector<MinimapLive::Marker> players, pings;
+        CopyLiveMarkers(players, pings, GetTickCount());
+        for (const auto& player : players)
+        {
+            float offset = 0;
+            if (!CompassHud::BearingToBarOffset(CompassHud::BearingRadians(playerX, playerZ,
+                FixedToWorld(player.x), FixedToWorld(player.z)), heading, innerHalf, offset))
+                continue;
+            const int x = cx + static_cast<int>(std::lround(offset));
+            DrawHudTriangle(renderer, commandBuffer, x, innerTop + s(9), s(8), 0, {palette.outline.r, palette.outline.g, palette.outline.b});
+            DrawHudTriangle(renderer, commandBuffer, x, innerTop + s(7), s(6), 0, palette.playerLight);
+        }
+        // Pings: solid diamonds with a light rim.
+        for (const auto& ping : pings)
+        {
+            float offset = 0;
+            if (!CompassHud::BearingToBarOffset(CompassHud::BearingRadians(playerX, playerZ,
+                FixedToWorld(ping.x), FixedToWorld(ping.z)), heading, innerHalf, offset))
+                continue;
+            const int x = cx + static_cast<int>(std::lround(offset));
+            CmdClearSolidDiamond(renderer, commandBuffer, x, cy, s(8), palette.pingEdge.r, palette.pingEdge.g, palette.pingEdge.b);
+            CmdClearSolidDiamond(renderer, commandBuffer, x, cy, s(7), palette.pingRim.r, palette.pingRim.g, palette.pingRim.b);
+            CmdClearSolidDiamond(renderer, commandBuffer, x, cy, s(5), palette.pingFill.r, palette.pingFill.g, palette.pingFill.b);
+        }
+        // Selected waypoint: hollow diamond, or an arrow at the bar edge when behind.
+        if (waypoint.valid && waypoint.distance > 1.0f)
+        {
+            float offset = 0;
+            const bool inside = CompassHud::BearingToBarOffset(
+                CompassHud::BearingRadians(playerX, playerZ, waypoint.x, waypoint.z), heading, innerHalf, offset);
+            if (inside)
+            {
+                const int x = cx + static_cast<int>(std::lround(offset));
+                DrawHudHollowDiamond(renderer, commandBuffer, x, cy, s(12), s(5), palette.outline);
+                DrawHudHollowDiamond(renderer, commandBuffer, x, cy, s(11), s(3), palette.waypoint);
+            }
+            else
+            {
+                const bool left = offset < 0;
+                const int tip = left ? cx - halfWidth + s(12) : cx + halfWidth - s(12);
+                DrawHudTriangle(renderer, commandBuffer, tip + (left ? -1 : 1), cy, s(9), left ? 2 : 3, palette.outline);
+                DrawHudTriangle(renderer, commandBuffer, tip, cy, s(7), left ? 2 : 3, palette.waypoint);
+            }
+        }
+
+        // Centre caret marks the direction you are facing.
+        DrawHudTriangle(renderer, commandBuffer, cx, cy - halfHeight + s(9), s(6), 0, palette.outline);
+        DrawHudTriangle(renderer, commandBuffer, cx, cy - halfHeight + s(7), s(5), 0, {1.0f, 0.97f, 0.88f});
+        return cy + halfHeight;
+    }
+
+    void DrawHudReadout(VulkanMinimapRenderer& renderer, void* commandBuffer, float scale, int cx, int top,
+        const CapturedPlayerPosition& position, const HudWaypointInfo& waypoint)
+    {
+        const auto s = [scale](float value) { return MaxValue(1, static_cast<int>(std::lround(value * scale))); };
+        const bool coordinates = g_showCoordinates.load();
+        const bool distance = g_showWaypointDistance.load() && waypoint.valid;
+        if (!coordinates && !distance) return;
+
+        const int textSize = s(15);
+        const float height = FixedToWorld(position.y);
+        const bool hasHeight = g_showHeight.load() && std::isfinite(height) && std::fabs(height) < 5000.0f;
+        const std::wstring coordText = coordinates ?
+            CompassHud::FormatCoordinates(FixedToWorld(position.x), FixedToWorld(position.z), hasHeight, height) : L"";
+        const std::wstring distText = distance ? CompassHud::FormatDistance(waypoint.distance) : L"";
+        const int gap = s(14), icon = s(16);
+        const int coordWidth = coordinates ? MeasureHudText(coordText, textSize, false) : 0;
+        const int distWidth = distance ? icon + MeasureHudText(distText, textSize, true) : 0;
+        const int contentWidth = coordWidth + distWidth + (coordinates && distance ? gap * 2 + 1 : 0);
+        const int textHeight = HudTextHeight(textSize, false);
+        const int halfHeight = textHeight / 2 + s(7);
+        const int halfWidth = contentWidth / 2 + s(16);
+        const int cy = top + halfHeight;
+        DrawHudPlate(renderer, commandBuffer, cx, cy, halfWidth, halfHeight, s(1.2f));
+
+        int x = cx - contentWidth / 2;
+        const int textTop = cy - textHeight / 2;
+        if (coordinates)
+        {
+            DrawHudText(renderer, commandBuffer, coordText, x, textTop, textSize, false, HUD_TEXT, HUD_PLATE_INSET);
+            x += coordWidth;
+        }
+        if (coordinates && distance)
+        {
+            x += gap;
+            CmdClearRect(renderer, commandBuffer, 0.38f, 0.30f, 0.17f, 1.0f, x, cy - textHeight / 2 + s(2), 1, textHeight - s(4));
+            x += gap + 1;
+        }
+        if (distance)
+        {
+            const auto& palette = CompassHud::Palette(g_colorBlindMarkers.load());
+            DrawHudHollowDiamond(renderer, commandBuffer, x + s(6), cy, s(6), s(2), palette.waypoint);
+            DrawHudText(renderer, commandBuffer, distText, x + icon, textTop, textSize, true, palette.waypoint, HUD_PLATE_INSET);
+        }
+    }
+
+    bool ShouldDrawCompassHud()
+    {
+        return g_compassHudVisible.load() &&
+            (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load());
+    }
+
+    void DrawCompassHud(VulkanMinimapRenderer& renderer, void* commandBuffer)
+    {
+        CapturedPlayerPosition position{};
+        if (!TryGetPlayerPosition(position))
+            return;
+        const float scale = static_cast<float>(renderer.height) / 1080.0f *
+            ClampValue(g_compassScalePercent.load(), 50, 200) / 100.0f;
+        const int cx = static_cast<int>(renderer.width) / 2;
+        int top = static_cast<int>(std::lround(14.0f * scale)) +
+            ScaleMinimapOffset(g_compassOffset.load(), renderer.height);
+        const float playerX = FixedToWorld(position.x), playerZ = FixedToWorld(position.z);
+        const float heading = position.hasHeading && std::isfinite(position.headingRadians) ?
+            SmoothMapHeading(renderer, position.headingRadians, true, GetTickCount()) : 0.0f;
+        const HudWaypointInfo waypoint = NearestHudWaypoint(CopyWaypoints(), playerX, playerZ);
+        if (g_showCompass.load() && position.hasHeading)
+            top = DrawCompassBar(renderer, commandBuffer, scale, cx, top, playerX, playerZ, heading, waypoint) +
+                static_cast<int>(std::lround(4.0f * scale));
+        DrawHudReadout(renderer, commandBuffer, scale, cx, top, position, waypoint);
     }
 
     bool RecordVulkanMinimapCommandLocked(std::uint32_t imageIndex)
@@ -9715,12 +10146,16 @@ namespace
             ScopedTimer widget(DiagnosticCollector(), Metric::OverlayWidget);
             DrawMinimapWidget(g_renderer, commandBuffer);
         }
+        if (ShouldDrawCompassHud() && IsMinimapGameplay())
+            DrawCompassHud(g_renderer, commandBuffer);
         bool noticeOn = false;
         if (ReadMinimapNotice(noticeOn))
         {
             ScopedTimer notice(DiagnosticCollector(), Metric::OverlayNotice);
             DrawMinimapNotice(g_renderer, commandBuffer, noticeOn, GetDpiForWindow(GetForegroundWindow()));
         }
+        else if (ReadCompassNotice(noticeOn))
+            DrawMinimapNotice(g_renderer, commandBuffer, noticeOn, GetDpiForWindow(GetForegroundWindow()), true);
         g_renderer.fns.cmdEndRenderPass(commandBuffer);
         return g_renderer.fns.endCommandBuffer(commandBuffer) == VK_SUCCESS;
     }
@@ -9846,7 +10281,7 @@ namespace
             ShouldSampleMinimapFallbackCamera())
             TryCapturePlayerCameraFromRenderRoots();
         bool noticeOn = false;
-        const bool noticeVisible = ReadMinimapNotice(noticeOn);
+        const bool noticeVisible = ReadMinimapNotice(noticeOn) || ReadCompassNotice(noticeOn);
         bool visibleObserved = false;
         bool gameplayForDraw = false;
         const bool shouldDraw = ShouldDrawMinimapInWorld(&visibleObserved, &gameplayForDraw);
@@ -9859,7 +10294,8 @@ namespace
         std::uint64_t observationTicks = 0;
         if (ReadDiagnosticClock(nullptr, &observationTicks))
             DiagnosticCollector().Observe(state, observationTicks);
-        if (!shouldDraw && !noticeVisible)
+        const bool hudVisible = ShouldDrawCompassHud() && IsMinimapGameplay();
+        if (!shouldDraw && !noticeVisible && !hudVisible)
             return false;
 
         if (info.waitSemaphoreCount != 0 && info.pWaitSemaphores == nullptr)
@@ -9949,6 +10385,15 @@ namespace
         Log(oss.str());
     }
 
+    void UpdateCompassVisibilityHotkey(SHORT (WINAPI* poll)(int) = GetAsyncKeyState)
+    {
+        if (!MinimapKeyPressed(g_compassToggleKey.load(), 0, poll)) return;
+        const bool visible = !g_compassHudVisible.load();
+        g_compassHudVisible.store(visible);
+        if (IsMinimapGameFocused() && IsMinimapGameplay()) g_compassNotice.show(visible, GetTickCount64());
+        Log(std::string("[Minimap] compass visibility=") + (visible ? "on" : "off"));
+    }
+
     void UpdateMinimapRuntimeControls(ModContext* modContext, bool* gameplayObserved = nullptr)
     {
         const DWORD now = GetTickCount();
@@ -9959,6 +10404,7 @@ namespace
         }
 
         UpdateMinimapVisibilityHotkey();
+        UpdateCompassVisibilityHotkey();
         UpdateMinimapZoomHotkeys();
         const bool focused = IsMinimapGameFocused();
         const bool gameplay = focused && IsMinimapGameplay();
@@ -11172,7 +11618,7 @@ namespace
                 g_menuVisibilityCallHook, g_menuVisibilityHookActive,
                 g_menuVisibilityCaptureEpoch, g_menuVisibilitySnapshot);
             std::lock_guard<std::mutex> callback(g_presentCallbackMutex);
-            g_toggleNotice.clear();
+            g_toggleNotice.clear(); g_compassNotice.clear();
             if (g_fogUpdateHook != nullptr)
             {
                 g_fogUpdateHook->deactivate();

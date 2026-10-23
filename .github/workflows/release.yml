@@ -1,9 +1,7 @@
-name: Build Minimap 0.5.15
+name: Build Minimap Clear View
 
 on:
   push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,30 +13,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: microsoft/setup-msbuild@v2
-      - name: Prepare pinned shader compiler
+      - name: Build minimap_mod.dll
         shell: pwsh
         run: |
-          $toolRoot = Join-Path $env:RUNNER_TEMP 'minimap-glslang-16.6.0'
-          $archive = "$toolRoot.zip"
-          Invoke-WebRequest 'https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip' -OutFile $archive
-          if ((Get-FileHash -LiteralPath $archive).Hash -ine '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b') { throw 'Shader compiler archive hash mismatch' }
-          Expand-Archive -LiteralPath $archive -DestinationPath $toolRoot
-          $compiler = @(Get-ChildItem -LiteralPath $toolRoot -Recurse -File -Filter glslang.exe)
-          if ($compiler.Count -ne 1) { throw 'Expected one shader compiler' }
-          "MINIMAP_GLSLANG=$($compiler[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Check source inventory and workflow inputs
+          msbuild ./minimap_mod.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 `
+            "/p:OutDir=$PWD\build\bin\" "/p:IntDir=$PWD\build\obj\"
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Package mod folder
         shell: pwsh
-        run: ./ci/pipeline-tests.ps1
-      - name: Build, run focused tests, and package
-        shell: pwsh
-        run: ./ci/build.ps1 -OutputDirectory ./dist
+        run: |
+          $stage = Join-Path $PWD 'dist\Minimap_ClearView'
+          $modDir = Join-Path $stage 'mods\minimap_mod'
+          New-Item -ItemType Directory -Path $modDir -Force | Out-Null
+          Copy-Item build\bin\minimap_mod.dll $modDir
+          Get-ChildItem assets | ForEach-Object { Copy-Item $_.FullName $modDir -Recurse }
+          foreach ($name in 'README.md', 'README-INSTALL.txt', 'CREDITS.md', 'LICENSE', 'CLEAR-VIEW.md') {
+            Copy-Item $name $stage
+          }
+          Copy-Item docs $stage -Recurse
+          Copy-Item shroudtopia.example.json $stage
+          $sums = Get-ChildItem $stage -Recurse -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.FullName.Substring($stage.Length + 1).Replace('\', '/'))"
+          }
+          $sums | Set-Content (Join-Path $stage 'SHA256SUMS.txt') -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: shroudweave-minimap-v0.5.15-${{ github.sha }}
-          path: |
-            dist/*.zip
-            dist/*.sha256
-            dist/BUILD-RECEIPT.json
-            dist/SHA256SUMS.txt
+          name: Minimap_ClearView-${{ github.sha }}
+          path: dist/Minimap_ClearView
           if-no-files-found: error
           retention-days: 90
