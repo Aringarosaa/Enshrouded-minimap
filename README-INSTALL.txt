@@ -1,30 +1,38 @@
-Shroudweave Minimap + Compass (Clear View) 0.5.15-clearview
+Shroudweave Minimap + Compass (Clear View) - all-in-one package
 
 What it adds: an in-game minimap with world clock and weather, teammates on the
 game's compass, coordinates and waypoint distance, and colour-blind friendly
 map and marker colours. Client-side only: every player installs it on their own
-PC; nothing is needed on the server.
+PC; nothing is needed on the server. The Shroudtopia mod loader is included.
 
+INSTALL
 1. Close Enshrouded.
-2. Install Shroudtopia (the mod loader) if you don't have it yet:
-   https://www.nexusmods.com/enshrouded/mods/143?tab=files
-   Use the loader/proxy from Optional Files. Back up any existing shroudtopia.dll
-   and winmm.dll, then extract both beside enshrouded.exe.
-3. Extract this ZIP into the game folder (the folder with enshrouded.exe), for
-   example C:\Program Files (x86)\Steam\steamapps\common\Enshrouded
-   You should end up with mods\minimap_mod\minimap_mod.dll.
-   Keep only one minimap_mod folder; replace it if you had an older version.
-4. Start the game. No settings changes are needed.
+2. In Steam: right-click Enshrouded > Manage > Browse local files.
+   This opens the game folder (the one with enshrouded.exe).
+3. Extract everything from this ZIP into that folder.
+   You should now have, next to enshrouded.exe:
+     shroudtopia.dll, winmm.dll, shroudtopia.json, mods\minimap_mod\
+4. Start the game. The minimap appears bottom-right.
 
-Keys: F10 minimap on/off, +/- zoom, F9/F11 smaller/larger,
-      F8 compass additions and coordinates on/off.
+ALREADY USING OTHER SHROUDTOPIA MODS?
+When Windows asks to replace shroudtopia.json, choose Skip, then add the
+"minimap_mod" section from shroudtopia.example.json to your own file, so your
+other mods keep their settings. If another mod already uses winmm.dll, back up
+your files first.
 
-Optional settings go in shroudtopia.json under mods > minimap_mod.
-shroudtopia.example.json shows every setting; CLEAR-VIEW.md explains them.
-Do not overwrite other mods' settings when you edit it.
+KEYS
+F10 minimap on/off   +/- zoom   F9/F11 smaller/larger
+F8  teammate icons and coordinates on/off
 
-Requires Windows x64 and the Microsoft Visual C++ x64 Redistributable:
-https://aka.ms/vc14/vc_redist.x64.exe
+SETTINGS
+Edit shroudtopia.json (mods > minimap_mod). CLEAR-VIEW.md explains each setting.
 
-To uninstall or roll back: close the game and remove or restore mods\minimap_mod.
-Credits: original minimap by elxokker, maintained by Aerox912 (see CREDITS.md).
+If the game does not start or the minimap does not appear, install the
+Microsoft Visual C++ x64 Redistributable: https://aka.ms/vc14/vc_redist.x64.exe
+
+UNINSTALL
+Close the game and delete shroudtopia.dll, winmm.dll, shroudtopia.json and
+mods\minimap_mod from the game folder.
+
+Credits: original minimap by elxokker, maintained by Aerox912 (CREDITS.md).
+Shroudtopia by s0T7x / Miguel Oppermann, MIT licence (SHROUDTOPIA-LICENSE.txt).

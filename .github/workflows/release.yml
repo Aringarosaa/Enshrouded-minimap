@@ -32,6 +32,11 @@ jobs:
           }
           Copy-Item docs $stage -Recurse
           Copy-Item shroudtopia.example.json $stage
+          # Shroudtopia loader (MIT, s0T7x / Miguel Oppermann) so one zip installs everything.
+          foreach ($name in 'shroudtopia.dll', 'winmm.dll', 'shroudtopia.json', 'SHROUDTOPIA-LICENSE.txt') {
+            $file = Join-Path bundle $name
+            if (Test-Path $file) { Copy-Item $file $stage } else { Write-Warning "bundle/$name missing" }
+          }
           $sums = Get-ChildItem $stage -Recurse -File | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.FullName.Substring($stage.Length + 1).Replace('\', '/'))"
           }
@@ -42,13 +47,14 @@ jobs:
           path: dist/Minimap_ClearView
           if-no-files-found: error
           retention-days: 90
-      - name: Publish release for version tags
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release from the clear-view branch
+        if: github.ref == 'refs/heads/clear-view' && hashFiles('bundle/shroudtopia.dll') != '' && hashFiles('bundle/winmm.dll') != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = "v0.5.15-clearview.${{ github.run_number }}"
           $zip = "dist\Minimap_ClearView_$tag.zip"
           Compress-Archive -Path dist\Minimap_ClearView\* -DestinationPath $zip
-          gh release create $tag $zip --title "Minimap + Compass (Clear View) $tag" --notes-file README-INSTALL.txt
+          gh release create $tag $zip --target ${{ github.sha }} --latest `
+            --title "Minimap + Compass (Clear View) $tag" --notes-file README-INSTALL.txt
