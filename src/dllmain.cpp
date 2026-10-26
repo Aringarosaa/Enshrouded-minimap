@@ -1442,6 +1442,8 @@ namespace
     std::atomic<bool> g_showCompass{ false }, g_showCoordinates{ false }, g_showWaypointDistance{ false };
     std::atomic<bool> g_showExploration{ true };
     std::atomic<int> g_bigMapMode{ 0 }; // 0 closed, 1 current region, 2 whole world
+    // Set by the hotkey thread, consumed by the render thread.
+    std::atomic<int> g_bigMapZoomRequest{ 0 }, g_bigMapModeGeneration{ 0 };
     std::atomic<int> g_bigMapKey{ VK_F7 };
     std::atomic<bool> g_showGameCompassPlayers{ true };
     std::atomic<int> g_gameCompassOffset{ 0 }, g_gameCompassWidthPercent{ 100 };
@@ -10494,19 +10496,36 @@ namespace
         const int left = (static_cast<int>(renderer.width) - size - legendWidth) / 2;
         const int top = (static_cast<int>(renderer.height) - size) / 2;
 
-        // Region mode frames the region you are in (with a margin); world mode shows everything.
-        float viewWest = 0, viewNorth = REAL_MAP_WORLD_SIZE, viewSize = REAL_MAP_WORLD_SIZE;
-        const int here = RegionAt(FixedToWorld(position.x), FixedToWorld(position.z));
-        if (g_bigMapMode.load() == 1 && here && here < static_cast<int>(g_regionMap.minX.size()))
+        // Region mode opens framed on the region you are in; world mode shows
+        // everything. +/- then zoom in steps, centring on you when zooming in.
+        static int viewGeneration = -1;
+        static float viewSize = REAL_MAP_WORLD_SIZE, viewCentreX = REAL_MAP_WORLD_SIZE / 2, viewCentreZ = REAL_MAP_WORLD_SIZE / 2;
+        constexpr float minViewSize = 1280.0f, zoomFactor = 1.4f;
+        const float playerX = FixedToWorld(position.x), playerZ = FixedToWorld(position.z);
+        const int here = RegionAt(playerX, playerZ);
+        const int generation = g_bigMapModeGeneration.load();
+        if (generation != viewGeneration)
         {
-            const float w = g_regionMap.maxX[here] - g_regionMap.minX[here];
-            const float h = g_regionMap.maxZ[here] - g_regionMap.minZ[here];
-            viewSize = ClampValue(MaxValue(w, h) * 1.15f, 2560.0f, REAL_MAP_WORLD_SIZE);
-            const float centreX = (g_regionMap.minX[here] + g_regionMap.maxX[here]) / 2;
-            const float centreZ = (g_regionMap.minZ[here] + g_regionMap.maxZ[here]) / 2;
-            viewWest = ClampValue(centreX - viewSize / 2, 0.0f, REAL_MAP_WORLD_SIZE - viewSize);
-            viewNorth = ClampValue(centreZ + viewSize / 2, viewSize, REAL_MAP_WORLD_SIZE);
+            viewGeneration = generation;
+            viewSize = REAL_MAP_WORLD_SIZE;
+            viewCentreX = viewCentreZ = REAL_MAP_WORLD_SIZE / 2;
+            if (g_bigMapMode.load() == 1 && here && here < static_cast<int>(g_regionMap.minX.size()))
+            {
+                const float w = g_regionMap.maxX[here] - g_regionMap.minX[here];
+                const float h = g_regionMap.maxZ[here] - g_regionMap.minZ[here];
+                viewSize = ClampValue(MaxValue(w, h) * 1.15f, 2560.0f, REAL_MAP_WORLD_SIZE);
+                viewCentreX = (g_regionMap.minX[here] + g_regionMap.maxX[here]) / 2;
+                viewCentreZ = (g_regionMap.minZ[here] + g_regionMap.maxZ[here]) / 2;
+            }
         }
+        const int zoomSteps = g_bigMapZoomRequest.exchange(0);
+        if (zoomSteps != 0)
+        {
+            viewSize = ClampValue(viewSize / std::pow(zoomFactor, static_cast<float>(zoomSteps)), minViewSize, REAL_MAP_WORLD_SIZE);
+            if (zoomSteps > 0) { viewCentreX = playerX; viewCentreZ = playerZ; }
+        }
+        const float viewWest = ClampValue(viewCentreX - viewSize / 2, 0.0f, REAL_MAP_WORLD_SIZE - viewSize);
+        const float viewNorth = ClampValue(viewCentreZ + viewSize / 2, viewSize, REAL_MAP_WORLD_SIZE);
 
         const MinimapFogFrame fog = CaptureMinimapFogFrame();
         auto& cache = g_bigMapCache;
@@ -10634,7 +10653,7 @@ namespace
             ly += HudTextHeight(rowSize, false);
             DrawHudText(renderer, commandBuffer, L"show_fog_of_war on", lx, ly, rowSize, false, HUD_TEXT_DIM, HUD_PLATE_INSET);
         }
-        const std::wstring hint = Utf8ToWide(MinimapToggleKeyName(g_bigMapKey.load())) +
+        const std::wstring hint = L"+/- zoom   " + Utf8ToWide(MinimapToggleKeyName(g_bigMapKey.load())) +
             (g_bigMapMode.load() == 1 ? L": whole map" : L": close");
         DrawHudText(renderer, commandBuffer, hint, lx, top + size - HudTextHeight(s(14), false) - s(8), s(14), false,
             HUD_TEXT_DIM, HUD_PLATE_INSET);
@@ -10898,6 +10917,15 @@ namespace
 
     void UpdateMinimapZoomHotkeys(SHORT (WINAPI* poll)(int) = GetAsyncKeyState)
     {
+        if (g_bigMapMode.load() != 0)
+        {
+            // While the big map is open, +/- zoom it and leave the minimap zoom alone.
+            if (MinimapKeyPressed(g_minimapZoomInKey.load(), g_minimapZoomInSecondary.load(), poll))
+                g_bigMapZoomRequest.fetch_add(1);
+            if (MinimapKeyPressed(g_minimapZoomOutKey.load(), g_minimapZoomOutSecondary.load(), poll))
+                g_bigMapZoomRequest.fetch_sub(1);
+            return;
+        }
         int step = g_minimapZoomStep.load();
         bool changed = false;
         if (MinimapKeyPressed(g_minimapZoomInKey.load(), g_minimapZoomInSecondary.load(), poll))
@@ -10965,6 +10993,8 @@ namespace
         // Each press steps: closed -> your region -> whole world -> closed.
         const int mode = (g_bigMapMode.load() + 1) % 3;
         g_bigMapMode.store(mode);
+        g_bigMapModeGeneration.fetch_add(1);
+        g_bigMapZoomRequest.store(0);
         Log(std::string("[Minimap] big map=") + (mode == 0 ? "closed" : mode == 1 ? "region" : "world"));
     }
 

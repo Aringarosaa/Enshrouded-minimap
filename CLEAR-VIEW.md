@@ -12,7 +12,7 @@ and settings are unchanged.
   your selected waypoint (hollow yellow diamond, or an arrow at the edge when it
   is behind you), teammates (blue triangles) and pings (orange diamonds).
 - **Big map** (F7): opens on your current region; press F7 again for all of Embervale,
-  once more to close. Shows you,
+  once more to close; +/- zoom it while open. Shows you,
   teammates, your waypoint, pings and tombstones, plus every region's
   exploration progress. Regions you have not explored yet stay unnamed ("???").
   You can keep moving while it is open.

@@ -22,7 +22,7 @@ your files first.
 
 KEYS
 F10 minimap on/off   +/- zoom   F9/F11 smaller/larger
-F7  big map: your region, then whole map, then close
+F7  big map: your region, then whole map, then close (+/- zoom while open)
 F8  optional compass bar / coordinates on/off (both off by default)
 
 SETTINGS
