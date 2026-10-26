@@ -1439,7 +1439,9 @@ namespace
     std::atomic<bool> g_showOtherPlayers{ true };
     std::atomic<bool> g_showPings{ true };
     std::atomic<bool> g_showWaypoints{ true };
-    std::atomic<bool> g_showCompass{ false }, g_showCoordinates{ true }, g_showWaypointDistance{ true };
+    std::atomic<bool> g_showCompass{ false }, g_showCoordinates{ false }, g_showWaypointDistance{ false };
+    std::atomic<bool> g_showExploration{ true }, g_bigMapVisible{ false };
+    std::atomic<int> g_bigMapKey{ VK_F7 };
     std::atomic<bool> g_showGameCompassPlayers{ true };
     std::atomic<int> g_gameCompassOffset{ 0 }, g_gameCompassWidthPercent{ 100 };
     std::atomic<bool> g_showHeight{ false }, g_colorBlindMarkers{ true }, g_compassHudVisible{ true };
@@ -1978,8 +1980,14 @@ namespace
             const bool showGamePlayers = ReadMarkerVisibility(modContext, "show_compass_players");
             const int gameOffsetValue = ParseSignedConfigInteger(gameOffset, 0, -1080, 1080);
             const int gameWidthValue = ParseConfigInteger(gameWidth, 100, 50, 200);
-            const bool showCoordinates = ReadMarkerVisibility(modContext, "show_coordinates");
-            const bool showDistance = ReadMarkerVisibility(modContext, "show_waypoint_distance");
+            std::string coordValue = "false", distValue = "false", bigMapKey = "F7";
+            readOption("show_coordinates", coordValue);
+            readOption("show_waypoint_distance", distValue);
+            readOption("big_map_key", bigMapKey);
+            const bool showCoordinates = ParseConfigBoolean(coordValue, false);
+            const bool showDistance = ParseConfigBoolean(distValue, false);
+            const bool showExploration = ReadMarkerVisibility(modContext, "show_exploration");
+            const int bigKey = ParseMinimapToggleKey(bigMapKey, VK_F7);
             std::string heightValue = "false";
             readOption("show_height", heightValue);
             const bool showHeight = ParseConfigBoolean(heightValue, false);
@@ -1989,6 +1997,8 @@ namespace
             const int scaleValue = ParseConfigInteger(compassScale, 100, 50, 200);
             bool changed = g_showCompass.exchange(showCompass) != showCompass;
             changed |= g_showGameCompassPlayers.exchange(showGamePlayers) != showGamePlayers;
+            changed |= g_showExploration.exchange(showExploration) != showExploration;
+            changed |= g_bigMapKey.exchange(bigKey) != bigKey;
             changed |= g_gameCompassOffset.exchange(gameOffsetValue) != gameOffsetValue;
             changed |= g_gameCompassWidthPercent.exchange(gameWidthValue) != gameWidthValue;
             changed |= g_showCoordinates.exchange(showCoordinates) != showCoordinates;
@@ -2003,6 +2013,8 @@ namespace
                 std::ostringstream hud;
                 hud << "[Minimap] hud config | show_compass=" << showCompass
                     << " | show_compass_players=" << showGamePlayers
+                    << " | show_exploration=" << showExploration
+                    << " | big_map_key=" << MinimapToggleKeyName(bigKey)
                     << " | game_compass_offset=" << gameOffsetValue
                     << " | game_compass_width_percent=" << gameWidthValue
                     << " | show_coordinates=" << showCoordinates
@@ -10175,11 +10187,429 @@ namespace
         }
     }
 
+
+    // ---- Region exploration progress and the big map -----------------------
+    // embervale_regions.bin holds 320x320 region ids (row 0 = north, 32 m per
+    // cell, 0 = shroud sea). embervale_regions.json lists the region names in id
+    // order, so players can rename them without rebuilding the DLL.
+    constexpr int REGION_GRID_SIZE = 320;
+    constexpr float REGION_CELL_METRES = REAL_MAP_WORLD_SIZE / REGION_GRID_SIZE;
+
+    struct RegionMap
+    {
+        bool attempted = false, loaded = false;
+        std::vector<std::uint8_t> ids;
+        std::vector<std::wstring> names;
+        std::vector<std::uint32_t> cellCounts;   // per id, index 0 unused
+        std::vector<float> centreX, centreZ;     // label positions in world metres
+    };
+    RegionMap g_regionMap;
+    std::mutex g_regionMapMutex;
+
+    struct ExplorationSnapshot
+    {
+        bool valid = false;
+        std::vector<float> regionFraction;       // per id, index 0 unused
+        float worldFraction = 0;
+        const LiveFogSnapshot* source = nullptr;
+        DWORD tick = 0;
+    };
+    ExplorationSnapshot g_exploration;           // render thread only
+
+    std::wstring Utf8ToWide(const std::string& text)
+    {
+        if (text.empty()) return {};
+        const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+        std::wstring result(MaxValue(0, length), L'\0');
+        if (length > 0)
+            MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+        return result;
+    }
+
+    // Reads the string array after "regions" without a JSON library.
+    std::vector<std::wstring> ParseRegionNames(const std::string& json)
+    {
+        std::vector<std::wstring> names;
+        std::size_t at = json.find("\"regions\"");
+        if (at == std::string::npos) return names;
+        at = json.find('[', at);
+        const std::size_t end = at == std::string::npos ? at : json.find(']', at);
+        while (at != std::string::npos && at < end)
+        {
+            const std::size_t open = json.find('"', at + 1);
+            if (open == std::string::npos || open > end) break;
+            std::string value;
+            std::size_t i = open + 1;
+            for (; i < json.size() && json[i] != '"'; ++i)
+            {
+                if (json[i] == '\\' && i + 1 < json.size()) ++i;
+                value.push_back(json[i]);
+            }
+            names.push_back(Utf8ToWide(value));
+            at = i;
+        }
+        return names;
+    }
+
+    void EnsureRegionMapLoaded()
+    {
+        std::lock_guard<std::mutex> lock(g_regionMapMutex);
+        if (g_regionMap.attempted) return;
+        g_regionMap.attempted = true;
+
+        std::vector<std::string> directories;
+        if (g_modContext != nullptr && !g_modContext->shroudtopia.mod_folder.empty())
+            directories.push_back(JoinPath(g_modContext->shroudtopia.mod_folder, "minimap_mod"));
+        const std::string gameDir = GetExecutableDirectory();
+        if (!gameDir.empty())
+            directories.push_back(JoinPath(JoinPath(gameDir, "mods"), "minimap_mod"));
+
+        for (const std::string& directory : directories)
+        {
+            std::vector<std::uint8_t> ids, json;
+            if (!TryReadBinaryFile(JoinPath(directory, "embervale_regions.bin"), ids) ||
+                ids.size() != static_cast<std::size_t>(REGION_GRID_SIZE) * REGION_GRID_SIZE ||
+                !TryReadBinaryFile(JoinPath(directory, "embervale_regions.json"), json))
+                continue;
+            auto names = ParseRegionNames(std::string(json.begin(), json.end()));
+            if (names.empty()) continue;
+
+            const std::size_t count = names.size() + 1;
+            std::vector<double> sumX(count), sumZ(count);
+            g_regionMap.cellCounts.assign(count, 0);
+            for (int row = 0; row < REGION_GRID_SIZE; ++row)
+                for (int col = 0; col < REGION_GRID_SIZE; ++col)
+                {
+                    std::uint8_t& id = ids[static_cast<std::size_t>(row) * REGION_GRID_SIZE + col];
+                    if (id >= count) id = 0;
+                    if (!id) continue;
+                    ++g_regionMap.cellCounts[id];
+                    sumX[id] += (col + 0.5) * REGION_CELL_METRES;
+                    sumZ[id] += REAL_MAP_WORLD_SIZE - (row + 0.5) * REGION_CELL_METRES;
+                }
+            g_regionMap.centreX.assign(count, 0);
+            g_regionMap.centreZ.assign(count, 0);
+            for (std::size_t id = 1; id < count; ++id)
+                if (g_regionMap.cellCounts[id])
+                {
+                    g_regionMap.centreX[id] = static_cast<float>(sumX[id] / g_regionMap.cellCounts[id]);
+                    g_regionMap.centreZ[id] = static_cast<float>(sumZ[id] / g_regionMap.cellCounts[id]);
+                }
+            g_regionMap.ids = std::move(ids);
+            g_regionMap.names = std::move(names);
+            g_regionMap.loaded = true;
+            Log("[Minimap] loaded region map | path=" + directory + " | regions=" + std::to_string(g_regionMap.names.size()));
+            return;
+        }
+        Log("[Minimap] region map missing; exploration progress disabled");
+    }
+
+    int RegionAt(float worldX, float worldZ)
+    {
+        if (!g_regionMap.loaded || !std::isfinite(worldX) || !std::isfinite(worldZ)) return 0;
+        const int col = static_cast<int>(worldX / REGION_CELL_METRES);
+        const int row = static_cast<int>((REAL_MAP_WORLD_SIZE - worldZ) / REGION_CELL_METRES);
+        if (col < 0 || row < 0 || col >= REGION_GRID_SIZE || row >= REGION_GRID_SIZE) return 0;
+        return g_regionMap.ids[static_cast<std::size_t>(row) * REGION_GRID_SIZE + col];
+    }
+
+    // Recounts explored cells when a new exploration grid arrives (at most every 2 s).
+    const ExplorationSnapshot& UpdateExploration()
+    {
+        EnsureRegionMapLoaded();
+        const DWORD now = GetTickCount();
+        const auto fog = CopyLiveFog(now);
+        if (!g_regionMap.loaded || !fog)
+        {
+            if (!fog && now - g_exploration.tick > 5000) g_exploration.valid = false;
+            return g_exploration;
+        }
+        if (g_exploration.valid && (fog.get() == g_exploration.source || now - g_exploration.tick < 2000))
+            return g_exploration;
+
+        const std::size_t count = g_regionMap.names.size() + 1;
+        std::vector<std::uint32_t> explored(count, 0);
+        std::uint32_t total = 0, exploredTotal = 0;
+        for (int row = 0; row < REGION_GRID_SIZE; ++row)
+            for (int col = 0; col < REGION_GRID_SIZE; ++col)
+            {
+                const std::uint8_t id = g_regionMap.ids[static_cast<std::size_t>(row) * REGION_GRID_SIZE + col];
+                if (!id) continue;
+                ++total;
+                const float x = (col + 0.5f) * REGION_CELL_METRES;
+                const float z = REAL_MAP_WORLD_SIZE - (row + 0.5f) * REGION_CELL_METRES;
+                if (SampleLiveFog(fog.get(), x, z) >= 0.5f) { ++explored[id]; ++exploredTotal; }
+            }
+        g_exploration.regionFraction.assign(count, 0);
+        for (std::size_t id = 1; id < count; ++id)
+            if (g_regionMap.cellCounts[id])
+                g_exploration.regionFraction[id] = static_cast<float>(explored[id]) / g_regionMap.cellCounts[id];
+        g_exploration.worldFraction = total ? static_cast<float>(exploredTotal) / total : 0;
+        g_exploration.source = fog.get();
+        g_exploration.tick = now;
+        g_exploration.valid = true;
+        return g_exploration;
+    }
+
+    std::wstring FormatPercent(float fraction)
+    {
+        return std::to_wstring(static_cast<int>(std::floor(ClampValue(fraction, 0.0f, 1.0f) * 100.0f))) + L"%";
+    }
+
+    // Region-entry notice: "Revelwood · 64% explored", shown for a few seconds.
+    struct RegionNoticeState
+    {
+        int current = 0, candidate = 0;
+        DWORD candidateSince = 0, shownAt = 0;
+        std::wstring text;
+    };
+    RegionNoticeState g_regionNotice;            // render thread only
+
+    void DrawRegionNotice(VulkanMinimapRenderer& renderer, void* commandBuffer, float playerX, float playerZ)
+    {
+        if (!g_showExploration.load()) return;
+        const auto& exploration = UpdateExploration();
+        const DWORD now = GetTickCount();
+        const int region = RegionAt(playerX, playerZ);
+        auto& state = g_regionNotice;
+        if (region != state.candidate) { state.candidate = region; state.candidateSince = now; }
+        // Require a second in the new region so walking along a border does not flicker.
+        if (region && region != state.current && now - state.candidateSince > 1000 && exploration.valid)
+        {
+            state.current = region;
+            state.shownAt = now;
+            state.text = g_regionMap.names[region - 1] + L"  \x00B7  " +
+                FormatPercent(exploration.regionFraction[region]) + L" explored";
+        }
+        if (!region) state.current = 0;
+        if (state.text.empty() || now - state.shownAt > 4000) return;
+
+        const float scale = static_cast<float>(renderer.height) / 1080.0f;
+        const int textSize = MaxValue(10, static_cast<int>(std::lround(19 * scale)));
+        const int w = MeasureHudText(state.text, textSize, true), h = HudTextHeight(textSize, true);
+        const int cx = static_cast<int>(renderer.width) / 2;
+        const int cy = static_cast<int>(renderer.height) * 2 / 3 - static_cast<int>(std::lround(50 * scale));
+        DrawHudPlate(renderer, commandBuffer, cx, cy, w / 2 + static_cast<int>(std::lround(22 * scale)),
+            h / 2 + static_cast<int>(std::lround(9 * scale)), MaxValue(1, static_cast<int>(std::lround(1.5f * scale))));
+        DrawHudText(renderer, commandBuffer, state.text, cx - w / 2, cy - h / 2, textSize, true, HUD_TEXT, HUD_PLATE_INSET);
+    }
+
+    // The big map is rendered into a cache of colour-batched rectangles, rebuilt
+    // only when the layout, map style or exploration grid changes, because
+    // drawing ~100k terrain cells one clear at a time would cost far too much.
+    struct BigMapCache
+    {
+        int left = -1, top = -1, size = 0, cell = 0;
+        const LiveFogSnapshot* fog = nullptr;
+        bool fogEnabled = false, defaultStyle = false;
+        int light = -1;
+        DWORD built = 0;
+        std::vector<std::pair<std::uint32_t, std::vector<VkClearRect>>> batches;
+    };
+    BigMapCache g_bigMapCache;                   // render thread only
+
+    void RebuildBigMapCache(VulkanMinimapRenderer& renderer, int left, int top, int size, int cell,
+        const MinimapFogFrame& fog)
+    {
+        auto& cache = g_bigMapCache;
+        cache.batches.clear();
+        EnsureRealMapLoaded();
+        std::lock_guard<std::mutex> lock(g_realMapMutex);
+        const RealMapTexture& map = ActiveRealMapLocked();
+        if (!map.loaded || map.rgba.empty()) return;
+        const int light = g_minimapMapLight.load();
+        std::map<std::uint32_t, std::vector<VkClearRect>> byColor;
+        const int cells = size / cell;
+        const float metresPerCell = REAL_MAP_WORLD_SIZE / cells;
+        for (int row = 0; row < cells; ++row)
+        {
+            std::uint32_t runKey = 0xFFFFFFFFu;
+            int runStart = 0;
+            const auto flush = [&](int end) {
+                if (runKey != 0xFFFFFFFFu && end > runStart)
+                    AppendClippedClearRect(renderer, byColor[runKey], left + runStart * cell, top + row * cell,
+                        (end - runStart) * cell, cell);
+            };
+            const float worldZ = REAL_MAP_WORLD_SIZE - (row + 0.5f) * metresPerCell;
+            const int mapY = ClampValue(static_cast<int>((1.0f - worldZ / REAL_MAP_WORLD_SIZE) * (map.height - 1)), 0, map.height - 1);
+            // Average a small block of texels per cell so the downscaled terrain is not grainy.
+            const int block = ClampValue(map.width / cells, 1, 4);
+            for (int col = 0; col < cells; ++col)
+            {
+                const float worldX = (col + 0.5f) * metresPerCell;
+                const int mapX = ClampValue(static_cast<int>(worldX / REAL_MAP_WORLD_SIZE * (map.width - 1)), 0, map.width - 1);
+                float red = 0, green = 0, blue = 0;
+                for (int by = 0; by < block; ++by)
+                    for (int bx = 0; bx < block; ++bx)
+                    {
+                        const int tx = ClampValue(mapX - block / 2 + bx, 0, map.width - 1);
+                        const int ty = ClampValue(mapY - block / 2 + by, 0, map.height - 1);
+                        const std::size_t offset = (static_cast<std::size_t>(ty) * map.width + tx) * 4;
+                        red += map.rgba[offset]; green += map.rgba[offset + 1]; blue += map.rgba[offset + 2];
+                    }
+                const float norm = 1.0f / (255.0f * block * block);
+                red *= norm; green *= norm; blue *= norm;
+                red = ClampValue((red - 0.42f) * 1.20f + 0.42f, 0.0f, 1.0f);
+                green = ClampValue((green - 0.42f) * 1.22f + 0.42f, 0.0f, 1.0f);
+                blue = ClampValue((blue - 0.42f) * 1.16f + 0.42f, 0.0f, 1.0f);
+                ApplyMapLighting(red, green, blue, 0.0f, light);
+                if (fog.enabled)
+                    ApplyExplorationFog(red, green, blue, SampleLiveFog(fog.snapshot.get(), worldX, worldZ));
+                // 32 levels per channel keeps the number of distinct clears manageable.
+                const auto q = [](float v) { return static_cast<std::uint32_t>(std::lround(ClampValue(v, 0.0f, 1.0f) * 31.0f)); };
+                const std::uint32_t key = (q(red) << 10) | (q(green) << 5) | q(blue);
+                if (key != runKey) { flush(col); runKey = key; runStart = col; }
+            }
+            flush(cells);
+        }
+        cache.batches.assign(byColor.begin(), byColor.end());
+    }
+
+    void DrawBigMap(VulkanMinimapRenderer& renderer, void* commandBuffer)
+    {
+        CapturedPlayerPosition position{};
+        if (!TryGetPlayerPosition(position)) return;
+        const float scale = static_cast<float>(renderer.height) / 1080.0f;
+        const auto s = [scale](float value) { return MaxValue(1, static_cast<int>(std::lround(value * scale))); };
+        const int cell = MaxValue(2, s(2.5f));
+        const int size = (static_cast<int>(renderer.height * 0.80f) / cell) * cell;
+        const int legendWidth = s(250);
+        const int left = (static_cast<int>(renderer.width) - size - legendWidth) / 2;
+        const int top = (static_cast<int>(renderer.height) - size) / 2;
+
+        const MinimapFogFrame fog = CaptureMinimapFogFrame();
+        auto& cache = g_bigMapCache;
+        const DWORD now = GetTickCount();
+        const bool layoutChanged = cache.left != left || cache.top != top || cache.size != size || cache.cell != cell;
+        const bool styleChanged = cache.defaultStyle != g_defaultMapStyle.load() || cache.light != g_minimapMapLight.load() ||
+            cache.fogEnabled != fog.enabled;
+        const bool fogChanged = cache.fog != fog.snapshot.get() && now - cache.built > 2000;
+        if (layoutChanged || styleChanged || fogChanged || cache.batches.empty())
+        {
+            RebuildBigMapCache(renderer, left, top, size, cell, fog);
+            cache.left = left; cache.top = top; cache.size = size; cache.cell = cell;
+            cache.fog = fog.snapshot.get(); cache.fogEnabled = fog.enabled;
+            cache.defaultStyle = g_defaultMapStyle.load(); cache.light = g_minimapMapLight.load();
+            cache.built = now;
+        }
+
+        // Frame, terrain and legend panel.
+        const int frame = s(10);
+        DrawHudPlate(renderer, commandBuffer, left + (size + legendWidth) / 2, top + size / 2,
+            (size + legendWidth) / 2 + frame, size / 2 + frame, s(2));
+        for (const auto& [key, rects] : cache.batches)
+            CmdClearRects(renderer, commandBuffer, ((key >> 10) & 31) / 31.0f, ((key >> 5) & 31) / 31.0f,
+                (key & 31) / 31.0f, 1.0f, rects);
+
+        const float metresPerPixel = REAL_MAP_WORLD_SIZE / size;
+        const auto project = [&](float worldX, float worldZ, int& x, int& y) {
+            x = left + static_cast<int>(worldX / metresPerPixel);
+            y = top + static_cast<int>((REAL_MAP_WORLD_SIZE - worldZ) / metresPerPixel);
+            return x >= left && x < left + size && y >= top && y < top + size;
+        };
+
+        // Region names with exploration progress, outlined over the terrain.
+        const auto& exploration = UpdateExploration();
+        const bool showExploration = g_showExploration.load() && exploration.valid;
+        if (showExploration)
+        {
+            std::lock_guard<std::mutex> lock(g_regionMapMutex);
+            for (std::size_t id = 1; id < g_regionMap.names.size() + 1; ++id)
+            {
+                int x, y;
+                if (!g_regionMap.cellCounts[id] || !project(g_regionMap.centreX[id], g_regionMap.centreZ[id], x, y)) continue;
+                const std::wstring& name = g_regionMap.names[id - 1];
+                const std::wstring percent = FormatPercent(exploration.regionFraction[id]);
+                const int nameSize = s(15), pctSize = s(13);
+                const int nw = MeasureHudText(name, nameSize, true), pw = MeasureHudText(percent, pctSize, true);
+                const int nh = HudTextHeight(nameSize, true);
+                DrawHudOutlinedText(renderer, commandBuffer, name, x - nw / 2, y - nh, nameSize, HUD_TEXT, {0.02f, 0.02f, 0.03f});
+                DrawHudOutlinedText(renderer, commandBuffer, percent, x - pw / 2, y + s(1), pctSize, {1.0f, 0.86f, 0.40f}, {0.02f, 0.02f, 0.03f});
+            }
+        }
+
+        // Markers: tombstones, waypoint, pings, teammates, then you on top.
+        for (const auto& death : CopyDeathMarkers(now))
+        {
+            int x, y;
+            if (project(FixedToWorld(death.x), FixedToWorld(death.z), x, y))
+                DrawDeathMarker(renderer, commandBuffer, x, y, 200, x, y, death.key);
+        }
+        if (g_liveMarkerLayoutSupported && g_showWaypoints.load())
+            for (const auto& waypoint : CopyWaypoints())
+            {
+                int x, y;
+                if (project(FixedToWorld(waypoint.x), FixedToWorld(waypoint.z), x, y))
+                    DrawWaypointDiamond(renderer, commandBuffer, x, y);
+            }
+        std::vector<MinimapLive::Marker> players, pings;
+        CopyLiveMarkers(players, pings, now);
+        for (const auto& ping : pings)
+        {
+            int x, y;
+            if (project(FixedToWorld(ping.x), FixedToWorld(ping.z), x, y))
+                DrawPingDiamond(renderer, commandBuffer, x, y);
+        }
+        for (const auto& player : players)
+        {
+            int x, y;
+            if (project(FixedToWorld(player.x), FixedToWorld(player.z), x, y))
+                DrawRemotePlayerArrow(renderer, commandBuffer, x, y, player.heading);
+        }
+        {
+            int x, y;
+            if (project(FixedToWorld(position.x), FixedToWorld(position.z), x, y))
+                CmdClearPlayerArrow(renderer, commandBuffer, x, y, 60, position.hasHeading ? position.headingRadians : 0.0f);
+        }
+
+        // Legend: world total and every region, current region highlighted.
+        const int lx = left + size + s(18), lw = legendWidth - s(26);
+        int ly = top + s(14);
+        const int titleSize = s(20), rowSize = s(16);
+        DrawHudText(renderer, commandBuffer, L"Embervale", lx, ly, titleSize, true, {1.0f, 0.86f, 0.40f}, HUD_PLATE_INSET);
+        ly += HudTextHeight(titleSize, true) + s(4);
+        if (showExploration)
+        {
+            const std::wstring total = FormatPercent(exploration.worldFraction) + L" explored";
+            DrawHudText(renderer, commandBuffer, total, lx, ly, rowSize, false, HUD_TEXT, HUD_PLATE_INSET);
+            ly += HudTextHeight(rowSize, false) + s(14);
+            const int here = RegionAt(FixedToWorld(position.x), FixedToWorld(position.z));
+            std::lock_guard<std::mutex> lock(g_regionMapMutex);
+            for (std::size_t id = 1; id < g_regionMap.names.size() + 1; ++id)
+            {
+                const bool current = static_cast<int>(id) == here;
+                const CompassHud::Rgb color = current ? CompassHud::Rgb{1.0f, 0.86f, 0.40f} : HUD_TEXT;
+                const std::wstring percent = FormatPercent(exploration.regionFraction[id]);
+                DrawHudText(renderer, commandBuffer, g_regionMap.names[id - 1], lx, ly, rowSize, current, color, HUD_PLATE_INSET);
+                DrawHudText(renderer, commandBuffer, percent, lx + lw - MeasureHudText(percent, rowSize, true), ly,
+                    rowSize, true, color, HUD_PLATE_INSET);
+                ly += HudTextHeight(rowSize, false) + s(6);
+                // Thin progress bar under each row.
+                const int barW = lw, filled = static_cast<int>(barW * ClampValue(exploration.regionFraction[id], 0.0f, 1.0f));
+                CmdClearRect(renderer, commandBuffer, 0.16f, 0.13f, 0.08f, 1.0f, lx, ly, barW, s(4));
+                CmdClearRect(renderer, commandBuffer, current ? 1.0f : 0.76f, current ? 0.86f : 0.59f, current ? 0.40f : 0.32f,
+                    1.0f, lx, ly, filled, s(4));
+                ly += s(14);
+            }
+        }
+        else
+        {
+            DrawHudText(renderer, commandBuffer, L"Exploration needs", lx, ly, rowSize, false, HUD_TEXT_DIM, HUD_PLATE_INSET);
+            ly += HudTextHeight(rowSize, false);
+            DrawHudText(renderer, commandBuffer, L"show_fog_of_war on", lx, ly, rowSize, false, HUD_TEXT_DIM, HUD_PLATE_INSET);
+        }
+        const std::wstring hint = L"Close: " + Utf8ToWide(MinimapToggleKeyName(g_bigMapKey.load()));
+        DrawHudText(renderer, commandBuffer, hint, lx, top + size - HudTextHeight(s(14), false) - s(8), s(14), false,
+            HUD_TEXT_DIM, HUD_PLATE_INSET);
+    }
+
     bool ShouldDrawCompassHud()
     {
-        return g_compassHudVisible.load() &&
-            (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load() ||
-             g_showGameCompassPlayers.load());
+        // F8 only hides the optional bar and readout; teammate icons, region
+        // notices and the big map have their own switches.
+        const bool panels = g_compassHudVisible.load() &&
+            (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load());
+        return panels || g_showGameCompassPlayers.load() || g_showExploration.load() || g_bigMapVisible.load();
     }
 
     void DrawCompassHud(VulkanMinimapRenderer& renderer, void* commandBuffer)
@@ -10203,10 +10633,16 @@ namespace
         if (g_showGameCompassPlayers.load() && !g_showCompass.load() && position.hasHeading &&
             std::isfinite(position.headingRadians))
             DrawGameCompassPlayers(renderer, commandBuffer, playerX, playerZ, position.headingRadians);
-        if (g_showCompass.load() && position.hasHeading)
+        const bool panels = g_compassHudVisible.load();
+        if (panels && g_showCompass.load() && position.hasHeading)
             top = DrawCompassBar(renderer, commandBuffer, scale, cx, top, playerX, playerZ, heading, waypoint) +
                 static_cast<int>(std::lround(4.0f * scale));
-        DrawHudReadout(renderer, commandBuffer, scale, cx, top, position, waypoint);
+        if (panels)
+            DrawHudReadout(renderer, commandBuffer, scale, cx, top, position, waypoint);
+        if (g_bigMapVisible.load())
+            DrawBigMap(renderer, commandBuffer);
+        else
+            DrawRegionNotice(renderer, commandBuffer, playerX, playerZ);
     }
 
     bool RecordVulkanMinimapCommandLocked(std::uint32_t imageIndex)
@@ -10486,6 +10922,14 @@ namespace
         Log(std::string("[Minimap] compass visibility=") + (visible ? "on" : "off"));
     }
 
+    void UpdateBigMapHotkey(SHORT (WINAPI* poll)(int) = GetAsyncKeyState)
+    {
+        if (!MinimapKeyPressed(g_bigMapKey.load(), 0, poll)) return;
+        const bool visible = !g_bigMapVisible.load();
+        g_bigMapVisible.store(visible);
+        Log(std::string("[Minimap] big map=") + (visible ? "open" : "closed"));
+    }
+
     void UpdateMinimapRuntimeControls(ModContext* modContext, bool* gameplayObserved = nullptr)
     {
         const DWORD now = GetTickCount();
@@ -10497,6 +10941,7 @@ namespace
 
         UpdateMinimapVisibilityHotkey();
         UpdateCompassVisibilityHotkey();
+        UpdateBigMapHotkey();
         UpdateMinimapZoomHotkeys();
         const bool focused = IsMinimapGameFocused();
         const bool gameplay = focused && IsMinimapGameplay();

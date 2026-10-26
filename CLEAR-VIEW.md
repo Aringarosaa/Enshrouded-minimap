@@ -11,9 +11,12 @@ and settings are unchanged.
 - **Optional compass bar** (off by default): N/E/S/W and NE/SE/SW/NW letters,
   your selected waypoint (hollow yellow diamond, or an arrow at the edge when it
   is behind you), teammates (blue triangles) and pings (orange diamonds).
-- **Coordinate readout** under the compass: `X` (east) and `Y` (north) in metres,
-  optional height.
-- **Waypoint distance** next to the coordinates, for example `240 m` or `1.2 km`.
+- **Big map** (F7): the whole of Embervale in the middle of the screen with you,
+  teammates, your waypoint, pings and tombstones, plus every region's
+  exploration progress. You can keep moving while it is open.
+- **Exploration progress**: entering a region shows e.g. `Revelwood · 64% explored`.
+  Region borders are approximate; rename regions in `embervale_regions.json`.
+- **Coordinate readout and waypoint distance** (off by default) under the compass.
 - **Colour-blind friendly marker colours** on the minimap and compass:
   teammates blue, pings orange, waypoint yellow with dark edges, custom pins pink.
   Set `marker_colors` to `original` for the old green/yellow/red markers.
@@ -28,11 +31,13 @@ and settings are unchanged.
 | `game_compass_offset` | `0` | Nudge those markers; pixels at 1080p, positive moves down |
 | `game_compass_width_percent` | `100` | Spread of those markers; raise if they drift outward of the game's letters |
 | `show_compass` | `false` | Extra compass bar on/off (teammate markers then move to the bar) |
-| `show_coordinates` | `true` | Coordinate readout on/off |
-| `show_waypoint_distance` | `true` | Waypoint distance on/off |
+| `big_map_key` | `F7` | Open/close the big map; `none` disables |
+| `show_exploration` | `true` | Region-entry notice and percentages (needs `show_fog_of_war`) |
+| `show_coordinates` | `false` | Coordinate readout on/off |
+| `show_waypoint_distance` | `false` | Waypoint distance on/off |
 | `show_height` | `false` | Add height to the coordinates (may be approximate) |
 | `marker_colors` | `colorblind` | `colorblind` or `original` |
-| `compass_toggle_key` | `F8` | Hide/show all compass additions and the readout; `none` disables |
+| `compass_toggle_key` | `F8` | Hide/show the optional compass bar and readout; `none` disables |
 | `compass_offset` | `0` | Moves the bar and readout; pixels at 1080p, positive moves down |
 | `compass_scale_percent` | `100` | Size of the bar and readout, 50 to 200 |
 

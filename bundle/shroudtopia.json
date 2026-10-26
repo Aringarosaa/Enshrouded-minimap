@@ -21,13 +21,15 @@
             "show_compass_players": true,
             "game_compass_offset": 0,
             "game_compass_width_percent": 100,
-            "show_coordinates": true,
-            "show_waypoint_distance": true,
+            "show_coordinates": false,
+            "show_waypoint_distance": false,
             "show_height": false,
             "marker_colors": "colorblind",
             "compass_toggle_key": "F8",
             "compass_offset": 0,
-            "compass_scale_percent": 100
+            "compass_scale_percent": 100,
+            "show_exploration": true,
+            "big_map_key": "F7"
         }
     },
     "updateDelay": 500

@@ -2,7 +2,7 @@
   "id": "minimap_mod",
   "version": "0.5.15",
   "name": "Shroudweave Minimap + Compass (Clear View)",
-  "description": "In-game minimap, world clock, compass bar, coordinates and waypoint distance for Enshrouded, with colour-blind friendly colours.",
+  "description": "In-game minimap, world clock, big map, exploration progress and teammates on the compass for Enshrouded, with colour-blind friendly colours.",
   "author": "Aerox912; original minimap by elxokker",
   "authors": [
     "elxokker",
@@ -41,8 +41,8 @@
       "size_decrease_key": "F9",
       "size_increase_key": "F11",
       "show_compass": false,
-      "show_coordinates": true,
-      "show_waypoint_distance": true,
+      "show_coordinates": false,
+      "show_waypoint_distance": false,
       "show_height": false,
       "marker_colors": "colorblind",
       "compass_toggle_key": "F8",
@@ -50,7 +50,9 @@
       "compass_scale_percent": 100,
       "show_compass_players": true,
       "game_compass_offset": 0,
-      "game_compass_width_percent": 100
+      "game_compass_width_percent": 100,
+      "show_exploration": true,
+      "big_map_key": "F7"
     }
   }
 }

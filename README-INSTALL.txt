@@ -1,8 +1,8 @@
 Shroudweave Minimap + Compass (Clear View) - all-in-one package
 
-What it adds: an in-game minimap with world clock and weather, teammates on the
-game's compass, coordinates and waypoint distance, and colour-blind friendly
-map and marker colours. Client-side only: every player installs it on their own
+What it adds: an in-game minimap with world clock and weather, a big map with
+exploration progress per region, teammates on the game's compass, and
+colour-blind friendly map and marker colours. Client-side only: every player installs it on their own
 PC; nothing is needed on the server. The Shroudtopia mod loader is included.
 
 INSTALL
@@ -22,7 +22,8 @@ your files first.
 
 KEYS
 F10 minimap on/off   +/- zoom   F9/F11 smaller/larger
-F8  teammate icons and coordinates on/off
+F7  big map with exploration progress
+F8  optional compass bar / coordinates on/off (both off by default)
 
 SETTINGS
 Edit shroudtopia.json (mods > minimap_mod). CLEAR-VIEW.md explains each setting.
