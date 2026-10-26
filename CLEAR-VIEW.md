@@ -15,7 +15,9 @@ and settings are unchanged.
   teammates, your waypoint, pings and tombstones, plus every region's
   exploration progress. You can keep moving while it is open.
 - **Exploration progress**: entering a region shows e.g. `Revelwood · 64% explored`.
-  Region borders are approximate; rename regions in `embervale_regions.json`.
+  Regions: Springlands, Revelwood, Blackmire, Veilwater Basin, Nomad Highlands,
+  Kindlewastes, Albaneve Summits and Cinder's Cradle. Borders are approximate
+  (drawn from the map); rename regions in `embervale_regions.json`.
 - **Coordinate readout and waypoint distance** (off by default) under the compass.
 - **Colour-blind friendly marker colours** on the minimap and compass:
   teammates blue, pings orange, waypoint yellow with dark edges, custom pins pink.
