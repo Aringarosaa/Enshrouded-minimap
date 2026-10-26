@@ -11,9 +11,11 @@ and settings are unchanged.
 - **Optional compass bar** (off by default): N/E/S/W and NE/SE/SW/NW letters,
   your selected waypoint (hollow yellow diamond, or an arrow at the edge when it
   is behind you), teammates (blue triangles) and pings (orange diamonds).
-- **Big map** (F7): the whole of Embervale in the middle of the screen with you,
+- **Big map** (F7): opens on your current region; press F7 again for all of Embervale,
+  once more to close. Shows you,
   teammates, your waypoint, pings and tombstones, plus every region's
-  exploration progress. You can keep moving while it is open.
+  exploration progress. Regions you have not explored yet stay unnamed ("???").
+  You can keep moving while it is open.
 - **Exploration progress**: entering a region shows e.g. `Revelwood · 64% explored`.
   Regions: Springlands, Revelwood, Blackmire, Veilwater Basin, Nomad Highlands,
   Kindlewastes, Albaneve Summits and Cinder's Cradle. Borders are approximate

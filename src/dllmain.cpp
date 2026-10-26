@@ -1440,7 +1440,8 @@ namespace
     std::atomic<bool> g_showPings{ true };
     std::atomic<bool> g_showWaypoints{ true };
     std::atomic<bool> g_showCompass{ false }, g_showCoordinates{ false }, g_showWaypointDistance{ false };
-    std::atomic<bool> g_showExploration{ true }, g_bigMapVisible{ false };
+    std::atomic<bool> g_showExploration{ true };
+    std::atomic<int> g_bigMapMode{ 0 }; // 0 closed, 1 current region, 2 whole world
     std::atomic<int> g_bigMapKey{ VK_F7 };
     std::atomic<bool> g_showGameCompassPlayers{ true };
     std::atomic<int> g_gameCompassOffset{ 0 }, g_gameCompassWidthPercent{ 100 };
@@ -9898,7 +9899,8 @@ namespace
         auto layer = [&](int inset, float r, float g, float b) {
             const int hw = halfWidth - inset, hh = halfHeight - inset;
             if (hw <= 0 || hh <= 0) return;
-            const int chamfer = MaxValue(2, hh / 2);
+            // Cap the corner cut so large plates keep small, even corners.
+            const int chamfer = MinValue(MaxValue(2, hh / 2), MaxValue(6, border * 6));
             std::vector<VkClearRect> rows;
             rows.reserve(hh * 2 + 1);
             for (int y = -hh; y <= hh; ++y)
@@ -10202,6 +10204,7 @@ namespace
         std::vector<std::wstring> names;
         std::vector<std::uint32_t> cellCounts;   // per id, index 0 unused
         std::vector<float> centreX, centreZ;     // label positions in world metres
+        std::vector<float> minX, maxX, minZ, maxZ; // bounds in world metres
     };
     RegionMap g_regionMap;
     std::mutex g_regionMapMutex;
@@ -10289,6 +10292,19 @@ namespace
                 }
             g_regionMap.centreX.assign(count, 0);
             g_regionMap.centreZ.assign(count, 0);
+            g_regionMap.minX.assign(count, REAL_MAP_WORLD_SIZE); g_regionMap.maxX.assign(count, 0);
+            g_regionMap.minZ.assign(count, REAL_MAP_WORLD_SIZE); g_regionMap.maxZ.assign(count, 0);
+            for (int row = 0; row < REGION_GRID_SIZE; ++row)
+                for (int col = 0; col < REGION_GRID_SIZE; ++col)
+                {
+                    const std::uint8_t id = ids[static_cast<std::size_t>(row) * REGION_GRID_SIZE + col];
+                    if (!id) continue;
+                    const float x = col * REGION_CELL_METRES, z = REAL_MAP_WORLD_SIZE - (row + 1) * REGION_CELL_METRES;
+                    g_regionMap.minX[id] = MinValue(g_regionMap.minX[id], x);
+                    g_regionMap.maxX[id] = MaxValue(g_regionMap.maxX[id], x + REGION_CELL_METRES);
+                    g_regionMap.minZ[id] = MinValue(g_regionMap.minZ[id], z);
+                    g_regionMap.maxZ[id] = MaxValue(g_regionMap.maxZ[id], z + REGION_CELL_METRES);
+                }
             for (std::size_t id = 1; id < count; ++id)
                 if (g_regionMap.cellCounts[id])
                 {
@@ -10400,6 +10416,7 @@ namespace
     struct BigMapCache
     {
         int left = -1, top = -1, size = 0, cell = 0;
+        float viewWest = -1, viewNorth = -1, viewSize = 0;
         const LiveFogSnapshot* fog = nullptr;
         bool fogEnabled = false, defaultStyle = false;
         int light = -1;
@@ -10409,7 +10426,7 @@ namespace
     BigMapCache g_bigMapCache;                   // render thread only
 
     void RebuildBigMapCache(VulkanMinimapRenderer& renderer, int left, int top, int size, int cell,
-        const MinimapFogFrame& fog)
+        float viewWest, float viewNorth, float viewSize, const MinimapFogFrame& fog)
     {
         auto& cache = g_bigMapCache;
         cache.batches.clear();
@@ -10420,7 +10437,7 @@ namespace
         const int light = g_minimapMapLight.load();
         std::map<std::uint32_t, std::vector<VkClearRect>> byColor;
         const int cells = size / cell;
-        const float metresPerCell = REAL_MAP_WORLD_SIZE / cells;
+        const float metresPerCell = viewSize / cells;
         for (int row = 0; row < cells; ++row)
         {
             std::uint32_t runKey = 0xFFFFFFFFu;
@@ -10430,13 +10447,13 @@ namespace
                     AppendClippedClearRect(renderer, byColor[runKey], left + runStart * cell, top + row * cell,
                         (end - runStart) * cell, cell);
             };
-            const float worldZ = REAL_MAP_WORLD_SIZE - (row + 0.5f) * metresPerCell;
+            const float worldZ = viewNorth - (row + 0.5f) * metresPerCell;
             const int mapY = ClampValue(static_cast<int>((1.0f - worldZ / REAL_MAP_WORLD_SIZE) * (map.height - 1)), 0, map.height - 1);
             // Average a small block of texels per cell so the downscaled terrain is not grainy.
-            const int block = ClampValue(map.width / cells, 1, 4);
+            const int block = ClampValue(static_cast<int>(map.width * viewSize / REAL_MAP_WORLD_SIZE) / cells, 1, 4);
             for (int col = 0; col < cells; ++col)
             {
-                const float worldX = (col + 0.5f) * metresPerCell;
+                const float worldX = viewWest + (col + 0.5f) * metresPerCell;
                 const int mapX = ClampValue(static_cast<int>(worldX / REAL_MAP_WORLD_SIZE * (map.width - 1)), 0, map.width - 1);
                 float red = 0, green = 0, blue = 0;
                 for (int by = 0; by < block; ++by)
@@ -10477,17 +10494,33 @@ namespace
         const int left = (static_cast<int>(renderer.width) - size - legendWidth) / 2;
         const int top = (static_cast<int>(renderer.height) - size) / 2;
 
+        // Region mode frames the region you are in (with a margin); world mode shows everything.
+        float viewWest = 0, viewNorth = REAL_MAP_WORLD_SIZE, viewSize = REAL_MAP_WORLD_SIZE;
+        const int here = RegionAt(FixedToWorld(position.x), FixedToWorld(position.z));
+        if (g_bigMapMode.load() == 1 && here && here < static_cast<int>(g_regionMap.minX.size()))
+        {
+            const float w = g_regionMap.maxX[here] - g_regionMap.minX[here];
+            const float h = g_regionMap.maxZ[here] - g_regionMap.minZ[here];
+            viewSize = ClampValue(MaxValue(w, h) * 1.15f, 2560.0f, REAL_MAP_WORLD_SIZE);
+            const float centreX = (g_regionMap.minX[here] + g_regionMap.maxX[here]) / 2;
+            const float centreZ = (g_regionMap.minZ[here] + g_regionMap.maxZ[here]) / 2;
+            viewWest = ClampValue(centreX - viewSize / 2, 0.0f, REAL_MAP_WORLD_SIZE - viewSize);
+            viewNorth = ClampValue(centreZ + viewSize / 2, viewSize, REAL_MAP_WORLD_SIZE);
+        }
+
         const MinimapFogFrame fog = CaptureMinimapFogFrame();
         auto& cache = g_bigMapCache;
         const DWORD now = GetTickCount();
-        const bool layoutChanged = cache.left != left || cache.top != top || cache.size != size || cache.cell != cell;
+        const bool layoutChanged = cache.left != left || cache.top != top || cache.size != size || cache.cell != cell ||
+            cache.viewWest != viewWest || cache.viewNorth != viewNorth || cache.viewSize != viewSize;
         const bool styleChanged = cache.defaultStyle != g_defaultMapStyle.load() || cache.light != g_minimapMapLight.load() ||
             cache.fogEnabled != fog.enabled;
         const bool fogChanged = cache.fog != fog.snapshot.get() && now - cache.built > 2000;
         if (layoutChanged || styleChanged || fogChanged || cache.batches.empty())
         {
-            RebuildBigMapCache(renderer, left, top, size, cell, fog);
+            RebuildBigMapCache(renderer, left, top, size, cell, viewWest, viewNorth, viewSize, fog);
             cache.left = left; cache.top = top; cache.size = size; cache.cell = cell;
+            cache.viewWest = viewWest; cache.viewNorth = viewNorth; cache.viewSize = viewSize;
             cache.fog = fog.snapshot.get(); cache.fogEnabled = fog.enabled;
             cache.defaultStyle = g_defaultMapStyle.load(); cache.light = g_minimapMapLight.load();
             cache.built = now;
@@ -10501,10 +10534,10 @@ namespace
             CmdClearRects(renderer, commandBuffer, ((key >> 10) & 31) / 31.0f, ((key >> 5) & 31) / 31.0f,
                 (key & 31) / 31.0f, 1.0f, rects);
 
-        const float metresPerPixel = REAL_MAP_WORLD_SIZE / size;
+        const float metresPerPixel = viewSize / size;
         const auto project = [&](float worldX, float worldZ, int& x, int& y) {
-            x = left + static_cast<int>(worldX / metresPerPixel);
-            y = top + static_cast<int>((REAL_MAP_WORLD_SIZE - worldZ) / metresPerPixel);
+            x = left + static_cast<int>(std::floor((worldX - viewWest) / metresPerPixel));
+            y = top + static_cast<int>(std::floor((viewNorth - worldZ) / metresPerPixel));
             return x >= left && x < left + size && y >= top && y < top + size;
         };
 
@@ -10518,8 +10551,10 @@ namespace
             {
                 int x, y;
                 if (!g_regionMap.cellCounts[id] || !project(g_regionMap.centreX[id], g_regionMap.centreZ[id], x, y)) continue;
-                const std::wstring& name = g_regionMap.names[id - 1];
-                const std::wstring percent = FormatPercent(exploration.regionFraction[id]);
+                // Unexplored regions stay unnamed so the map does not spoil them.
+                const bool charted = exploration.regionFraction[id] > 0.0f;
+                const std::wstring name = charted ? g_regionMap.names[id - 1] : L"???";
+                const std::wstring percent = charted ? FormatPercent(exploration.regionFraction[id]) : L"";
                 const int nameSize = s(15), pctSize = s(13);
                 const int nw = MeasureHudText(name, nameSize, true), pw = MeasureHudText(percent, pctSize, true);
                 const int nh = HudTextHeight(nameSize, true);
@@ -10573,14 +10608,15 @@ namespace
             const std::wstring total = FormatPercent(exploration.worldFraction) + L" explored";
             DrawHudText(renderer, commandBuffer, total, lx, ly, rowSize, false, HUD_TEXT, HUD_PLATE_INSET);
             ly += HudTextHeight(rowSize, false) + s(14);
-            const int here = RegionAt(FixedToWorld(position.x), FixedToWorld(position.z));
             std::lock_guard<std::mutex> lock(g_regionMapMutex);
             for (std::size_t id = 1; id < g_regionMap.names.size() + 1; ++id)
             {
                 const bool current = static_cast<int>(id) == here;
                 const CompassHud::Rgb color = current ? CompassHud::Rgb{1.0f, 0.86f, 0.40f} : HUD_TEXT;
+                const bool charted = exploration.regionFraction[id] > 0.0f;
                 const std::wstring percent = FormatPercent(exploration.regionFraction[id]);
-                DrawHudText(renderer, commandBuffer, g_regionMap.names[id - 1], lx, ly, rowSize, current, color, HUD_PLATE_INSET);
+                DrawHudText(renderer, commandBuffer, charted ? g_regionMap.names[id - 1] : L"Uncharted region", lx, ly,
+                    rowSize, current, charted ? color : HUD_TEXT_DIM, HUD_PLATE_INSET);
                 DrawHudText(renderer, commandBuffer, percent, lx + lw - MeasureHudText(percent, rowSize, true), ly,
                     rowSize, true, color, HUD_PLATE_INSET);
                 ly += HudTextHeight(rowSize, false) + s(6);
@@ -10598,7 +10634,8 @@ namespace
             ly += HudTextHeight(rowSize, false);
             DrawHudText(renderer, commandBuffer, L"show_fog_of_war on", lx, ly, rowSize, false, HUD_TEXT_DIM, HUD_PLATE_INSET);
         }
-        const std::wstring hint = L"Close: " + Utf8ToWide(MinimapToggleKeyName(g_bigMapKey.load()));
+        const std::wstring hint = Utf8ToWide(MinimapToggleKeyName(g_bigMapKey.load())) +
+            (g_bigMapMode.load() == 1 ? L": whole map" : L": close");
         DrawHudText(renderer, commandBuffer, hint, lx, top + size - HudTextHeight(s(14), false) - s(8), s(14), false,
             HUD_TEXT_DIM, HUD_PLATE_INSET);
     }
@@ -10609,7 +10646,7 @@ namespace
         // notices and the big map have their own switches.
         const bool panels = g_compassHudVisible.load() &&
             (g_showCompass.load() || g_showCoordinates.load() || g_showWaypointDistance.load());
-        return panels || g_showGameCompassPlayers.load() || g_showExploration.load() || g_bigMapVisible.load();
+        return panels || g_showGameCompassPlayers.load() || g_showExploration.load() || g_bigMapMode.load() != 0;
     }
 
     void DrawCompassHud(VulkanMinimapRenderer& renderer, void* commandBuffer)
@@ -10639,7 +10676,7 @@ namespace
                 static_cast<int>(std::lround(4.0f * scale));
         if (panels)
             DrawHudReadout(renderer, commandBuffer, scale, cx, top, position, waypoint);
-        if (g_bigMapVisible.load())
+        if (g_bigMapMode.load() != 0)
             DrawBigMap(renderer, commandBuffer);
         else
             DrawRegionNotice(renderer, commandBuffer, playerX, playerZ);
@@ -10925,9 +10962,10 @@ namespace
     void UpdateBigMapHotkey(SHORT (WINAPI* poll)(int) = GetAsyncKeyState)
     {
         if (!MinimapKeyPressed(g_bigMapKey.load(), 0, poll)) return;
-        const bool visible = !g_bigMapVisible.load();
-        g_bigMapVisible.store(visible);
-        Log(std::string("[Minimap] big map=") + (visible ? "open" : "closed"));
+        // Each press steps: closed -> your region -> whole world -> closed.
+        const int mode = (g_bigMapMode.load() + 1) % 3;
+        g_bigMapMode.store(mode);
+        Log(std::string("[Minimap] big map=") + (mode == 0 ? "closed" : mode == 1 ? "region" : "world"));
     }
 
     void UpdateMinimapRuntimeControls(ModContext* modContext, bool* gameplayObserved = nullptr)
